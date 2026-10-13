@@ -1,24 +1,22 @@
 # AI Code Assistant
 
-AI-powered coding workspace for developers who want faster project understanding, repository analysis, GitHub-aware workflows, and smarter code assistance.
+AI-powered developer workspace for GitHub repos, project intelligence, code review, and team collaboration.
 
-> Turn GitHub repos, project context, code review, and AI chat into a single developer workflow built for real engineering teams.
+Build faster with AI that understands your real project context — not just generic chat. Connect your GitHub repositories, analyze codebases, review pull requests, and collaborate inside one workspace designed for real engineering work.
 
 ## Why this project matters
 
-- Most AI coding tools are isolated from project context.
-- Real developer work happens across files, repos, PRs, issues, and team workflows.
-- This project brings AI into the full software lifecycle: repo intelligence, project chat, code review, collaboration, and plugin-based extensibility.
+Most AI tools stop at chat. Real development happens across repositories, files, pull requests, issues, and team workflows. AI Code Assistant brings project-aware AI into the full software lifecycle so developers can explore code, understand architecture, review quality, and collaborate with context.
 
 ## What it does
 
 - Chat with AI over project and repository context
-- Analyze GitHub repositories, issues, and pull requests
-- Work with imported project files and searchable workspace content
-- Run AI code review and quality analysis over a project or PR
-- Collaborate with team members and manage workspace permissions
-- Extend the platform through plugin and capability-based architecture
-- Support Stellar / Soroban-aware analysis for blockchain projects
+- Analyze GitHub repositories, issues, and PRs
+- Import projects and search across imported files
+- Run AI code review and quality analysis
+- Collaborate in workspaces with permissions and activity history
+- Extend the platform with plugins and capability-based integrations
+- Support Stellar / Soroban-aware development workflows
 
 ## Try it in 5 minutes
 
@@ -41,26 +39,22 @@ cp .env.example .env
 python run.py
 ```
 
-Open http://localhost:5000 and start from the app.
+Open http://localhost:5000 in your browser.
 
 ## Who it's for
 
-- Developers who want AI help grounded in their codebase
-- Teams reviewing pull requests and project quality
-- Engineers working with GitHub repositories and project-wide context
-- Builders exploring Stellar / Soroban tooling with AI assistance
+- Developers who want AI help grounded in their actual codebase
+- Teams reviewing Pull Requests and project quality
+- Engineers working across GitHub repositories and project files
+- Builders experimenting with AI workflows, plugins, and repo intelligence
 
 ## Why it stands out
 
 - Project-aware AI instead of generic chat-only tools
 - GitHub repo and PR intelligence built into the workflow
-- Structured AI findings with clear labels and review history
-- Workspaces and collaboration features for team use
-- Plugin architecture for extensibility and future integrations
-
-## Project status
-
-A mature, feature-rich developer platform with active GitHub integration, AI project analysis, review tooling, collaboration, and Phase 8 plugin / Stellar tooling under active development.
+- Structured findings with review history and quality signals
+- Team collaboration and workspace-level permissions
+- Extensible plugin architecture for future integrations
 
 ## Documentation
 
@@ -75,6 +69,3 @@ A mature, feature-rich developer platform with active GitHub integration, AI pro
 ## License
 
 [MIT](./LICENSE)
-
----
-
