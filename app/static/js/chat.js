@@ -32,6 +32,12 @@
   var providerOptions = [];
   var defaults = { provider: "", model: "", temperature: 0.7, system_prompt: "" };
 
+  // Streaming scroll safety (issue #9): auto-follow new tokens only while the
+  // user is already pinned to the bottom, so scrolling up mid-stream is never
+  // yanked back down.
+  var stickToBottom = true;
+  var SCROLL_STICK_THRESHOLD_PX = 40;
+
   var CSRF_TOKEN = null;
 
   function getCsrf() {
@@ -150,6 +156,7 @@
       (role === "user" ? "" : usageLine(usage));
     el.innerHTML = body;
     messagesEl.appendChild(el);
+    if (role !== "user") enhanceCode(el);
     scrollToBottom();
     return el;
   }
@@ -163,8 +170,137 @@
     return el;
   }
 
+  // Blinking cursor appended to the in-progress assistant bubble while tokens
+  // stream in, so the user sees the reply is still being generated.
+  function addStreamingCursor(container) {
+    if (!container) return null;
+    var cursor = document.createElement("span");
+    cursor.className = "streaming-cursor";
+    cursor.setAttribute("aria-hidden", "true");
+    cursor.textContent = "\u258c";
+    container.appendChild(cursor);
+    return cursor;
+  }
+
+  function removeStreamingCursor(container) {
+    if (!container) return;
+    var cursor = container.querySelector(".streaming-cursor");
+    if (cursor && cursor.parentNode) cursor.parentNode.removeChild(cursor);
+  }
+
+  // Mark the sidebar entry for the active conversation with a subtle status
+  // while its reply is streaming, and clear it when generation ends.
+  function setConversationStatus(id, status) {
+    if (!listEl || id === null || id === undefined) return;
+    var item = listEl.querySelector('.conversation-item[data-id="' + id + '"]');
+    if (!item) return;
+    var meta = item.querySelector(".conversation-meta");
+    if (!meta) return;
+    var badge = meta.querySelector(".conversation-status");
+    if (status) {
+      if (!badge) {
+        badge = document.createElement("span");
+        badge.className = "conversation-status";
+        badge.setAttribute("aria-label", "Generating response");
+        meta.appendChild(badge);
+      }
+      badge.textContent = "\u2026";
+    } else if (badge && badge.parentNode) {
+      badge.parentNode.removeChild(badge);
+    }
+  }
+
+  function isNearBottom() {
+    if (!messagesEl) return true;
+    return (
+      messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight <
+      SCROLL_STICK_THRESHOLD_PX
+    );
+  }
+
+  // Force-follow to the newest content. Used when the user sends a message or
+  // opens a conversation, where jumping to the bottom is the expected behavior.
   function scrollToBottom() {
+    stickToBottom = true;
     messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
+  // Follow new content only while the user is already pinned to the bottom, so
+  // a streaming token update never resets their scroll position (issue #9).
+  function maybeScrollToBottom() {
+    if (stickToBottom) messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
+  if (messagesEl) {
+    messagesEl.addEventListener("scroll", function () {
+      stickToBottom = isNearBottom();
+    });
+  }
+
+  // Copy-to-clipboard helpers for code blocks (issue #9).
+  function copyTextToClipboard(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(
+        function () {
+          flashInfo("Copied to clipboard.");
+        },
+        function () {
+          fallbackCopyText(text);
+        }
+      );
+      return;
+    }
+    fallbackCopyText(text);
+  }
+
+  function fallbackCopyText(text) {
+    var area = document.createElement("textarea");
+    area.value = text;
+    area.setAttribute("readonly", "");
+    area.style.position = "absolute";
+    area.style.left = "-9999px";
+    document.body.appendChild(area);
+    area.select();
+    try {
+      document.execCommand("copy");
+      flashInfo("Copied to clipboard.");
+    } catch (error) {
+      flashError("Copy failed.");
+    }
+    document.body.removeChild(area);
+  }
+
+  // Add a copy button to every rendered code block, skipping ones that already
+  // have one so repeated calls during streaming stay cheap.
+  function addCodeCopyButtons(container) {
+    if (!container || !container.querySelectorAll) return;
+    var blocks = container.querySelectorAll("pre.code-block");
+    Array.prototype.forEach.call(blocks, function (pre) {
+      if (pre.getElementsByClassName("code-copy-btn").length) return;
+      var button = document.createElement("button");
+      button.type = "button";
+      button.className = "code-copy-btn";
+      button.textContent = "Copy";
+      button.setAttribute("aria-label", "Copy code to clipboard");
+      pre.appendChild(button);
+    });
+  }
+
+  function enhanceCode(container) {
+    highlightCode(container);
+    addCodeCopyButtons(container);
+  }
+
+  if (messagesEl) {
+    messagesEl.addEventListener("click", function (event) {
+      var target = event.target;
+      var button = target && target.closest ? target.closest(".code-copy-btn") : null;
+      if (!button) return;
+      var pre = button.closest("pre");
+      var code = pre ? pre.querySelector("code") : null;
+      if (!code) return;
+      copyTextToClipboard(code.innerText || code.textContent || "");
+    });
   }
 
   function setActiveItem(id) {
@@ -207,6 +343,7 @@
     setActiveItem(id);
     messagesEl.innerHTML = "";
     actionsEl.hidden = false;
+    loadShareLinks(id);
     return api("/chat/conversations/" + id)
       .then(function (data) {
         data.messages.forEach(function (message) {
@@ -227,6 +364,27 @@
       .catch(function (error) {
         flashError(error.message);
       });
+  }
+
+  function loadShareLinks(id) {
+    var container = document.getElementById("share-links-list");
+    if (!container) return;
+    container.innerHTML = "";
+    api("/chat/conversations/" + id + "/share-links").then(function (links) {
+      links.forEach(function (link) {
+        var row = document.createElement("p");
+        var expiry = document.createElement("span");
+        expiry.textContent = "Read-only link expires " + new Date(link.expires_at).toLocaleString() + " ";
+        var revoke = document.createElement("button");
+        revoke.type = "button";
+        revoke.className = "btn btn-ghost btn-sm";
+        revoke.textContent = "Revoke";
+        revoke.dataset.revokeShareLinkId = link.id;
+        row.appendChild(expiry);
+        row.appendChild(revoke);
+        container.appendChild(row);
+      });
+    }).catch(function (error) { flashError(error.message); });
   }
 
   function newConversation() {
@@ -280,6 +438,17 @@
       sendBtn.disabled = false;
       sendBtn.setAttribute("aria-label", "Send message");
     }
+  }
+
+  // Disable composer controls while a reply is being generated so a second
+  // submission cannot start a duplicate stream.
+  function setControlsDisabled(disabled) {
+    if (inputEl) inputEl.disabled = disabled;
+    if (attachBtn) attachBtn.disabled = disabled;
+    if (providerEl) providerEl.disabled = disabled;
+    if (modelEl) modelEl.disabled = disabled;
+    if (tempEl) tempEl.disabled = disabled;
+    if (systemEl) systemEl.disabled = disabled;
   }
 
   function stopStream() {
@@ -393,6 +562,8 @@
     cancelRequested = false;
     currentController = new AbortController();
     setComposerState("streaming");
+    setControlsDisabled(true);
+    setConversationStatus(currentId, true);
     addMessage("user", content || "(image attached)", attachments);
 
     var typing = addTypingIndicator();
@@ -433,6 +604,7 @@
       streamBody.className = "message-body";
       typing.appendChild(streamBody);
       streamBody.textContent = "";
+      var streamingCursor = addStreamingCursor(streamBody);
 
       var reader = response.body.getReader();
       var decoder = new TextDecoder();
@@ -457,7 +629,8 @@
           if (payload.type === "token") {
             fullText += payload.content;
             streamBody.innerHTML = renderMarkdown(fullText);
-            scrollToBottom();
+            addStreamingCursor(streamBody);
+            maybeScrollToBottom();
           } else if (payload.type === "error") {
             flashError(payload.error);
           } else if (payload.type === "done") {
@@ -465,7 +638,7 @@
               streamBody.innerHTML =
                 renderMarkdown(payload.message.content) +
                 renderAttachments(payload.message.attachments);
-              highlightCode(streamBody);
+              enhanceCode(streamBody);
               var usage = payload.message.token_usage;
               if (usage) {
                 var usageRow = document.createElement("div");
@@ -484,7 +657,7 @@
                 renderUsage();
               }
             }
-            scrollToBottom();
+            maybeScrollToBottom();
           }
         });
       }
@@ -494,13 +667,15 @@
         flashInfo(cancelRequested ? "Generation stopped." : "Stream aborted.");
       } else {
         flashError(error.message);
+        showStreamRetry(error);
       }
     } finally {
+      removeStreamingCursor(typing);
       typing.classList.remove("typing", "streaming");
       var finalBody = typing.querySelector(".message-body");
       if (finalBody && finalBody.textContent) {
         // Covers partial output too (e.g. stream cancelled before "done").
-        highlightCode(finalBody);
+        enhanceCode(finalBody);
       }
       if (!finalBody || !finalBody.textContent) {
         typing.remove();
@@ -509,9 +684,34 @@
       cancelRequested = false;
       streaming = false;
       setComposerState("idle");
+      setControlsDisabled(false);
+      setConversationStatus(currentId, false);
       sendBtn.disabled = !!(onboardingEl && !onboardingEl.hidden);
       inputEl.focus();
     }
+  }
+
+  // Visible retry affordance when the SSE stream drops, so the user is not
+  // left with a silently truncated reply.
+  function showStreamRetry(error) {
+    var el = document.createElement("div");
+    el.className = "flash flash-error stream-retry";
+    el.appendChild(
+      document.createTextNode(
+        (error && error.message) || "The response stream was interrupted."
+      )
+    );
+    el.appendChild(document.createTextNode(" "));
+    var retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "btn btn-ghost btn-sm";
+    retry.textContent = "Retry";
+    retry.addEventListener("click", function () {
+      if (el.parentNode) el.parentNode.removeChild(el);
+      startStream();
+    });
+    el.appendChild(retry);
+    messagesEl.prepend(el);
   }
 
   function addListItem(conversation) {
@@ -844,6 +1044,29 @@
       var id = currentId;
       var button = event.target.closest("button");
       if (!button || id === null) return;
+      if (button.dataset.revokeShareLinkId) {
+        api("/chat/conversations/" + id + "/share-links/" + button.dataset.revokeShareLinkId, {
+          method: "DELETE",
+        }).then(function () { loadShareLinks(id); }).catch(function (error) { flashError(error.message); });
+        return;
+      }
+      if (button.id === "create-share-link") {
+        api("/chat/conversations/" + id + "/share-links", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        }).then(function (share) {
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(share.url).catch(function () {
+              window.prompt("Copy this read-only link:", share.url);
+            });
+          } else {
+            window.prompt("Copy this read-only link:", share.url);
+          }
+          loadShareLinks(id);
+        }).catch(function (error) { flashError(error.message); });
+        return;
+      }
       if (button.id === "rename-conversation") {
         var title = prompt("Rename conversation:", "");
         if (title === null) return;
@@ -895,4 +1118,15 @@
       }
     });
   });
+
+  // Test seam: expose the pure client helpers so the frontend unit tests can
+  // exercise them under jsdom without a browser. This is deliberately small and
+  // additive - it does not change any runtime behaviour.
+  window.AICA = {
+    escapeHtml: escapeHtml,
+    formatRelativeTime: formatRelativeTime,
+    renderMarkdown: renderMarkdown,
+    isNearBottom: isNearBottom,
+    getCsrf: getCsrf,
+  };
 })();

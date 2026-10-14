@@ -1,7 +1,10 @@
 """Chat routes: UI page, conversation CRUD, sharing, and SSE streaming."""
 
 import base64
+import errno
+import hashlib
 import json
+import secrets
 from datetime import UTC, datetime, timedelta
 
 from flask import (
@@ -30,7 +33,7 @@ from app.models import (
 )
 from app.models.message_attachment import ALLOWED_IMAGE_TYPES
 from app.models.project import STATUS_READY
-from app.services import audit, token_usage
+from app.services import audit, chat_export, token_usage
 from app.services.github import (
     GitHubError,
     GitHubNotConnectedError,
@@ -48,7 +51,7 @@ from app.services.provider_config import (
     provider_options,
 )
 from app.services.providers.registry import resolve_provider_name
-from app.services.providers.retry import RetryingProvider
+from app.services.providers.retry import RetryingProvider, is_transient_error
 
 #: Machine-readable code returned when the configured provider has no key.
 PROVIDER_NOT_CONFIGURED_CODE = "provider_not_configured"
@@ -63,12 +66,31 @@ def _provider_not_configured_payload(status: dict) -> dict:
     provider = status.get("provider") or "the configured provider"
     return {
         "error": (
-            f"No API key is configured for '{provider}'. Add one under API keys "
-            "to start chatting."
+            f"No API key is configured for '{provider}'. Add one under API keys to start chatting."
         ),
         "code": PROVIDER_NOT_CONFIGURED_CODE,
         "provider": status.get("provider"),
         "reason": status.get("reason"),
+    }
+
+
+#: Machine-readable code returned when a stream drops and the client should
+#: offer a retry (issue: streaming indicator and typing feedback).
+STREAM_INTERRUPTED_CODE = "stream_interrupted"
+
+
+def _stream_interrupted_payload(reply: str, reason: str | None = None) -> dict:
+    """Build the payload sent when an SSE stream drops mid-generation.
+
+    The partial reply is included so the client can keep what was generated
+    and offer a visible retry affordance instead of silently losing output.
+    """
+    return {
+        "type": "error",
+        "code": STREAM_INTERRUPTED_CODE,
+        "error": reason or "The response stream was interrupted. Retry to continue.",
+        "partial": reply,
+        "retryable": True,
     }
 
 
@@ -412,6 +434,20 @@ def export_conversation(conversation_id: int):
     )
 
 
+@bp.route("/conversations/<int:conversation_id>/export.md")
+@login_required
+def export_conversation_markdown(conversation_id: int):
+    """Export a conversation as a downloadable Markdown document (issue #46)."""
+    conversation = _get_conversation(conversation_id)
+    body = chat_export.render_conversation_markdown(conversation)
+    filename = f"conversation-{conversation.id}.md"
+    return Response(
+        body,
+        mimetype="text/markdown",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @bp.route("/conversations/<int:conversation_id>/shares", methods=["GET"])
 @login_required
 def list_shares(conversation_id: int):
@@ -476,6 +512,107 @@ def unshare_conversation(conversation_id: int, user_id: int):
     db.session.delete(share)
     db.session.commit()
     return jsonify({"ok": True})
+
+
+@bp.route("/conversations/<int:conversation_id>/share-links", methods=["GET", "POST"])
+@login_required
+def create_share_link(conversation_id: int):
+    """Create an expiring, read-only URL for a conversation owned by caller."""
+    if request.method == "GET":
+        conversation = _get_visible_conversation(conversation_id)
+        if conversation.user_id != current_user.id:
+            return jsonify([])
+        links = (
+            ConversationShare.query.filter_by(conversation_id=conversation.id)
+            .filter(ConversationShare.token_hash.isnot(None))
+            .order_by(ConversationShare.created_at.desc())
+            .all()
+        )
+        return jsonify(
+            [
+                {
+                    "id": link.id,
+                    "expires_at": link.expires_at.isoformat(),
+                    "permission": link.permission,
+                }
+                for link in links
+            ]
+        )
+    conversation = _get_conversation(conversation_id)
+    data = request.get_json(silent=True) or {}
+    try:
+        hours = int(data.get("expires_in_hours", 168))
+    except (TypeError, ValueError):
+        return jsonify({"error": "expires_in_hours must be an integer."}), 400
+    if hours < 1 or hours > 24 * 365:
+        return jsonify({"error": "Expiry must be between 1 hour and 365 days."}), 400
+    token = secrets.token_urlsafe(32)
+    expires_at = datetime.now(UTC) + timedelta(hours=hours)
+    share = ConversationShare(
+        conversation_id=conversation.id,
+        user_id=None,
+        shared_by_id=current_user.id,
+        token_hash=hashlib.sha256(token.encode()).hexdigest(),
+        expires_at=expires_at,
+        permission="read_only",
+    )
+    db.session.add(share)
+    db.session.commit()
+    return (
+        jsonify(
+            {
+                "id": share.id,
+                "url": url_for("chat.view_shared_conversation", token=token, _external=True),
+                "created_by": current_user.id,
+                "expires_at": expires_at.isoformat(),
+                "permission": "read_only",
+            }
+        ),
+        201,
+    )
+
+
+@bp.route("/conversations/<int:conversation_id>/share-links/<int:share_id>", methods=["DELETE"])
+@login_required
+def revoke_share_link(conversation_id: int, share_id: int):
+    """Revoke one of the current owner's public links."""
+    conversation = _get_conversation(conversation_id)
+    share = (
+        ConversationShare.query.filter_by(id=share_id, conversation_id=conversation.id)
+        .filter(ConversationShare.token_hash.isnot(None))
+        .first_or_404()
+    )
+    db.session.delete(share)
+    db.session.commit()
+    return jsonify({"ok": True})
+
+
+@bp.route("/shared/<token>")
+def view_shared_conversation(token: str):
+    """Render only the message history authorized by a valid share token."""
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    share = ConversationShare.query.filter_by(token_hash=token_hash).first()
+    now = datetime.now(UTC)
+    if share is None or share.expires_at is None:
+        abort(404)
+    expiry = (
+        share.expires_at.replace(tzinfo=UTC)
+        if share.expires_at.tzinfo is None
+        else share.expires_at
+    )
+    if expiry <= now or share.permission != "read_only":
+        abort(404)
+    conversation = Conversation.query.filter_by(id=share.conversation_id).first()
+    if conversation is None:
+        abort(404)
+    messages = [
+        {"role": message.role, "content": message.content, "created_at": message.created_at}
+        for message in conversation.messages
+        if message.role in {"user", "assistant"}
+    ]
+    return render_template(
+        "chat/shared_conversation.html", title=conversation.title, messages=messages
+    )
 
 
 @bp.route("/conversations/<int:conversation_id>/attachments", methods=["POST"])
@@ -667,11 +804,24 @@ def stream_message(conversation_id: int):
             partial = "".join(chunks)
             persist_assistant(partial, stream_usage(partial))
             raise
+        except OSError as exc:
+            # The transport dropped (connection reset, broken pipe, timeout).
+            # Keep the partial reply and surface a retryable error event so the
+            # client can show a retry affordance instead of losing output.
+            partial = "".join(chunks)
+            persist_assistant(partial, stream_usage(partial))
+            reason = None
+            if getattr(exc, "errno", None) in (errno.ECONNRESET, errno.EPIPE):
+                reason = "The connection was interrupted. Retry to continue."
+            yield f"data: {json.dumps(_stream_interrupted_payload(partial, reason))}\n\n"
+            return
         except LLMProviderError as exc:
             # A provider failure mid-stream: keep the partial text too.
             partial = "".join(chunks)
             persist_assistant(partial, stream_usage(partial))
-            yield f"data: {json.dumps({'type': 'error', 'error': str(exc)})}\n\n"
+            payload = _stream_interrupted_payload(partial, str(exc))
+            payload["retryable"] = is_transient_error(exc)
+            yield f"data: {json.dumps(payload)}\n\n"
             return
 
         reply = "".join(chunks)
@@ -685,7 +835,9 @@ def stream_message(conversation_id: int):
                     response.content, token_usage.usage_from_response(response, messages)
                 )
             except LLMProviderError as exc:
-                yield f"data: {json.dumps({'type': 'error', 'error': str(exc)})}\n\n"
+                payload = _stream_interrupted_payload("", str(exc))
+                payload["retryable"] = is_transient_error(exc)
+                yield f"data: {json.dumps(payload)}\n\n"
                 return
 
         payload = {"type": "done", "message": message.to_dict() if message else None}
