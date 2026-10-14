@@ -908,9 +908,7 @@ class TestStructuredFindingContract:
                 for i in range(5)
             ]
         }
-        result = reviews.parse_review_response(
-            json.dumps(payload), kind="pr", max_findings=2
-        )
+        result = reviews.parse_review_response(json.dumps(payload), kind="pr", max_findings=2)
         assert len(result["findings"]) == 2
         validated = reviews.validate_review_result(
             {"summary": {"overall_assessment": 1}, "findings": payload["findings"]},
@@ -925,17 +923,14 @@ class TestStructuredFindingContract:
             )["findings"]
             == []
         )
-        assert (
-            reviews.validate_review_result(
-                {
-                    "summary": {"files_affected": ["evil.py", "a0.py"]},
-                    "findings": payload["findings"],
-                    "known_files": ["a0.py"],
-                },
-                kind="pr",
-            )["summary"]["files_affected"]
-            == ["a0.py"]
-        )
+        assert reviews.validate_review_result(
+            {
+                "summary": {"files_affected": ["evil.py", "a0.py"]},
+                "findings": payload["findings"],
+                "known_files": ["a0.py"],
+            },
+            kind="pr",
+        )["summary"]["files_affected"] == ["a0.py"]
 
 
 #: A repository/PR payload that tries to hijack the reviewer's instructions.

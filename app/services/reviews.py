@@ -505,9 +505,11 @@ def parse_review_response(
     payload = _extract_json_object(raw)
     if max_findings == 0:
         return {
-            "summary": _normalize_summary(payload.get("summary"), raw)
-            if payload is not None
-            else _normalize_summary(None, raw),
+            "summary": (
+                _normalize_summary(payload.get("summary"), raw)
+                if payload is not None
+                else _normalize_summary(None, raw)
+            ),
             "findings": [],
             "raw": raw,
             "error": None,
@@ -526,9 +528,7 @@ def parse_review_response(
             if len(findings) >= max_findings:
                 break
         summary = _normalize_summary(payload.get("summary"), raw)
-        summary["files_affected"] = _accepted_paths(
-            summary.get("files_affected"), allowed_files
-        )
+        summary["files_affected"] = _accepted_paths(summary.get("files_affected"), allowed_files)
         return {
             "summary": summary,
             "findings": findings,
@@ -574,9 +574,7 @@ def validate_review_result(result, *, kind: str, known_files=None, max_findings=
             findings.append(finding)
     summary = _normalize_summary(result.get("summary"), "")
     summary.pop("raw", None)
-    summary["files_affected"] = _accepted_paths(
-        summary.get("files_affected"), allowed_files
-    )
+    summary["files_affected"] = _accepted_paths(summary.get("files_affected"), allowed_files)
     return {"summary": summary, "findings": findings}
 
 
@@ -672,10 +670,7 @@ def build_pr_context(pr: dict, files: list[dict], config: dict) -> dict:
             deletions = int(file.get("deletions") or 0)
         except (TypeError, ValueError):
             deletions = 0
-        changed.append(
-            f"- {filename} ({status}, "
-            f"+{additions}/-{deletions})\n{patch}"
-        )
+        changed.append(f"- {filename} ({status}, " f"+{additions}/-{deletions})\n{patch}")
 
     test_files = [
         f.get("filename")
@@ -685,8 +680,7 @@ def build_pr_context(pr: dict, files: list[dict], config: dict) -> dict:
     known_files = [
         f.get("filename")
         for f in selected
-        if isinstance(f.get("filename"), str)
-        and _valid_file_syntax(f.get("filename")) is not None
+        if isinstance(f.get("filename"), str) and _valid_file_syntax(f.get("filename")) is not None
     ]
     note = ""
     if files and len(selected) < len(files):
@@ -789,15 +783,10 @@ def _project_context(project, config: dict, kind: str) -> dict:
             budget=budget // 2,
         )
 
-    known_files = [
-        f.path for f in source_files if _valid_file_syntax(f.path) is not None
-    ]
+    known_files = [f.path for f in source_files if _valid_file_syntax(f.path) is not None]
     if kind == "tests":
         for row in [f for f in files if f.path in test_files][: max_files // 2]:
-            if (
-                _valid_file_syntax(row.path) is not None
-                and row.path not in known_files
-            ):
+            if _valid_file_syntax(row.path) is not None and row.path not in known_files:
                 known_files.append(row.path)
     return {
         "blocks": blocks,
