@@ -64,7 +64,8 @@ Open http://localhost:5000 in your browser.
 - [Plugin system](docs/plugins.md)
 - [Architecture](docs/architecture.md)
 - [Security model](docs/security.md)
-- [Roadmap](docs/roadmap.md)
+- [Soroban workflow guide](docs/soroban-workflow.md)
+- [Roadmap](https://github.com/AyinkxLab/ai-code-assistant/issues)
 
 ## License
 
