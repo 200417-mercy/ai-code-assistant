@@ -23,6 +23,7 @@ match the repository's conventions.
 - [Branch naming conventions](#branch-naming-conventions)
 - [Commit conventions](#commit-conventions)
 - [Choosing a GitHub issue](#choosing-a-github-issue)
+- [Drips Wave contributions](#drips-wave-contributions)
 - [Issue expectations](#issue-expectations)
 - [Pull request requirements](#pull-request-requirements)
 - [Testing requirements](#testing-requirements)
@@ -480,6 +481,52 @@ Rules:
   start work and cannot finish, say so so someone else can pick it up.
 - Ask for clarification in the issue thread if the acceptance criteria are
   unclear rather than guessing.
+
+## Drips Wave contributions
+
+Issues labeled `Stellar Wave` are funded through a Drips Wave program (for
+example the Stellar Wave Program). They follow the normal workflow in this
+guide with one extra requirement: the issue has to be assigned to you in the
+Wave app before you start, otherwise the work cannot be credited.
+
+### Labels and points
+
+- `Stellar Wave`: the issue is in the Wave program and earns points while a
+  Wave is active.
+- `difficulty/easy`, `difficulty/medium`, `difficulty/hard`: the complexity
+  estimate. The program's base point values are Trivial 100, Medium 150 and
+  High 200. The label is our honest estimate; the points an issue is worth
+  are set by the maintainer in the Drips dashboard when the issue is added
+  to the program, so treat the label as sizing, not as a payout promise.
+- `good first issue` / `help wanted`: good starting points; many Wave issues
+  carry one of these too.
+
+### Claiming a Wave issue
+
+1. Apply for the issue in the Drips Wave app. A GitHub comment alone does not
+   reserve the issue.
+2. **Wait until a maintainer assigns you.** In the Wave app the issue is only
+   yours once it has been assigned. A pull request opened before that can be
+   treated as duplicate work and is not credited.
+3. Then follow the normal workflow above: branch, focused commits, tests, and
+   a pull request that links the issue with `Closes #123`.
+
+### While you work
+
+- Keep the change inside the issue's stated scope. Split unrelated cleanups
+  into their own issue rather than bundling them.
+- Do not open pull requests for issues that are not assigned to you. This
+  repository receives several pull requests per issue during a Wave, and
+  duplicate work slows down review for everyone.
+- Follow the repository conventions (tests, `ruff`, `black`, and the commit
+  format) so the review only has to look at the substance of the change.
+- If you cannot finish, say so in the issue as early as possible so a
+  maintainer can release the issue for someone else.
+
+Wave rules, budgets, and point values are set by the Wave program organizers
+(see the [Drips Wave documentation](https://docs.drips.network/wave)), not by
+this project. This section documents what maintainers here expect from a Wave
+contribution.
 
 ## Issue expectations
 
