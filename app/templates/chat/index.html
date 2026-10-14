@@ -31,6 +31,7 @@
             {% if loop.first %}aria-current="true"{% endif %}>
           <span class="conversation-title">{{ conversation.title }}</span>
           <span class="conversation-meta">{{ conversation.message_count }} messages <time class="conversation-time" datetime="{{ conversation.updated_at.isoformat() if conversation.updated_at else '' }}"></time></span>
+          <span class="conversation-status" hidden aria-hidden="true"></span>
         </li>
       {% endfor %}
     </ul>
