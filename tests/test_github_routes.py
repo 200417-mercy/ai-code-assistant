@@ -365,9 +365,7 @@ class TestGrantedScopes:
         assert account.granted_scopes == ["repo", "read:user"]
 
     def test_callback_falls_back_to_exchange_scope(self, client, app, monkeypatch):
-        account = self._connect_with_user_scopes(
-            client, app, monkeypatch, None, "read:user repo"
-        )
+        account = self._connect_with_user_scopes(client, app, monkeypatch, None, "read:user repo")
         assert account.granted_scopes == ["read:user", "repo"]
 
     def _status_with_scopes(self, client, app, monkeypatch, scopes):
