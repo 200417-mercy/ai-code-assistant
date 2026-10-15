@@ -35,6 +35,7 @@ from app.models.message_attachment import ALLOWED_IMAGE_TYPES
 from app.models.project import STATUS_READY
 from app.services.conversation_search import search_conversations
 from app.services import audit, chat_export, token_usage
+from app.services.conversation_search import search_conversations
 from app.services.github import (
     GitHubError,
     GitHubNotConnectedError,
