@@ -375,6 +375,29 @@ class TestValidation:
                 validate_path(bad)
 
 
+class TestGrantedScopes:
+    """get_granted_scopes reads the X-OAuth-Scopes header (issue #57)."""
+
+    def test_reads_and_splits_the_header(self, ok_client):
+        client, session = ok_client
+        session.responses = [
+            FakeResponse(200, data={"id": 1}, headers={"X-OAuth-Scopes": "read:user, repo, gist"})
+        ]
+        assert client.get_granted_scopes() == ["read:user", "repo", "gist"]
+
+    def test_trims_whitespace_and_ignores_blanks(self, ok_client):
+        client, session = ok_client
+        session.responses = [
+            FakeResponse(200, data={"id": 1}, headers={"X-OAuth-Scopes": " repo ,, read:user "})
+        ]
+        assert client.get_granted_scopes() == ["repo", "read:user"]
+
+    def test_empty_when_header_absent(self, ok_client):
+        client, session = ok_client
+        session.responses = [FakeResponse(200, data={"id": 1})]
+        assert client.get_granted_scopes() == []
+
+
 class TestCompareRefs:
     def test_compare_refs_uses_github_compare_endpoint(self, ok_client):
         client, session = ok_client
