@@ -29,7 +29,7 @@ API (JSON)
     /github/api/repos/lookup                resolve owner/name to a repository
 """
 
-import re
+import logging
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urlencode
 
@@ -64,8 +64,7 @@ from app.services.github import (
 #: bounded avoids pathological query sizes on very large repositories.
 MAX_TREE_LAST_COMMITS = 100
 
-#: Pattern accepted by the repository lookup form: ``owner/name``.
-_FULL_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+logger = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------
@@ -173,11 +172,27 @@ def callback():
     try:
         token_data = response.json()
     except ValueError:
+        token_data = None
+    # GitHub answers a failed exchange with a JSON object, but a proxy or
+    # gateway in front of it can return anything (``null``, a list, HTML).
+    # Normalize to a dict so a malformed body degrades to the friendly
+    # failure path instead of raising.
+    if not isinstance(token_data, dict):
         token_data = {}
     if response.status_code >= 400 or "access_token" not in token_data:
         ratelimit.record(key)
-        current_app.logger.warning("GitHub token exchange failed: %s", token_data)
-        flash("GitHub authorization failed. Please try again.", "error")
+        # Only GitHub's own structured error fields are surfaced to the user.
+        # The raw response body may be a gateway HTML page carrying internal
+        # detail, so it is logged rather than flashed (issue #82).
+        message = token_data.get("error_description") or token_data.get("error")
+        if not message:
+            logger.warning(
+                "GitHub token exchange failed (HTTP %s): %s",
+                response.status_code,
+                response.text[:200],
+            )
+            message = "GitHub did not return a token. Please try again."
+        flash(f"GitHub authorization failed: {message}", "error")
         return redirect(url_for("github.index"))
 
     token = token_data["access_token"]
