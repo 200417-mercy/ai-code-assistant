@@ -47,9 +47,7 @@ class TestReviewHistoryPagination:
         assert data["has_next"] is True
         assert data["has_prev"] is False
 
-    def test_pages_partition_the_history_without_gaps_or_repeats(
-        self, client, make_user, login
-    ):
+    def test_pages_partition_the_history_without_gaps_or_repeats(self, client, make_user, login):
         user = make_user()
         login()
         _seed(user, 7)

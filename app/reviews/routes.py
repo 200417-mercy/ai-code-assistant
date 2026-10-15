@@ -80,9 +80,16 @@ def _reviews_page() -> int:
 
 
 def _reviews_per_page() -> int:
-    """Return the requested page size, clamped to the configured maximum."""
-    value = request.args.get("per_page", type=int) or REVIEWS_PER_PAGE_DEFAULT
-    return max(1, min(value, REVIEWS_PER_PAGE_MAX))
+    """Return the requested page size, clamped to the configured maximum.
+
+    Non-numeric, zero, and negative values fall back to the default; larger
+    values are capped at the maximum so a single request cannot ask for an
+    unbounded page.
+    """
+    value = request.args.get("per_page", type=int)
+    if value is None or value < 1:
+        return REVIEWS_PER_PAGE_DEFAULT
+    return min(value, REVIEWS_PER_PAGE_MAX)
 
 
 # --------------------------------------------------------------------------

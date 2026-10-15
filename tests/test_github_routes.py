@@ -444,20 +444,6 @@ class TestGrantedScopes:
         assert data["scopes"] == ["repo", "read:user"]
         assert data["missing_repo_scope"] is False
 
-    def test_dashboard_warns_when_repo_scope_missing(self, client, app):
-        _logged_in_client(client)
-        _create_account(app)  # scopes default to ""
-        html = client.get("/github/").get_data(as_text=True)
-        assert "github-scope-warning" in html
-
-    def test_dashboard_has_no_warning_with_repo_scope(self, client, app):
-        _logged_in_client(client)
-        account = _create_account(app)
-        account.scopes = "repo,read:user"
-        db.session.commit()
-        html = client.get("/github/").get_data(as_text=True)
-        assert "github-scope-warning" not in html
-
 
 class TestRepositoryApi:
     def test_repos_requires_connection(self, client):

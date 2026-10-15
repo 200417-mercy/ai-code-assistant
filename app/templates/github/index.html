@@ -12,7 +12,11 @@
     <div class="github-connection-status">
       <span class="status-dot status-connected"></span>
       Connected as <strong>@{{ account.github_username }}</strong>
-      {% if account.granted_scopes %}<span class="github-scopes">(scopes: {{ account.granted_scopes|join(', ') }})</span>{% endif %}
+      {% if granted_scopes %}
+        <span class="github-scopes">(granted scopes: {{ granted_scopes|join(', ') }})</span>
+      {% else %}
+        <span class="github-scopes">(granted scopes not reported by GitHub)</span>
+      {% endif %}
     </div>
     <div class="github-connection-actions">
       <a class="btn btn-primary" href="{{ url_for('github.repos') }}">Browse repositories</a>
@@ -23,12 +27,12 @@
     </div>
   </div>
 
-  {% if 'repo' not in account.granted_scopes %}
-  <div class="github-scope-warning" role="alert">
-    <strong>Limited access:</strong> your GitHub connection is missing the
-    <code>repo</code> scope, so private repositories will not load.
-    <a href="{{ url_for('github.connect') }}">Reconnect with repo access</a>.
-  </div>
+  {% if repo_scope_missing %}
+    <div class="github-warning" role="alert">
+      <strong>Missing the <code>repo</code> scope.</strong>
+      Private repositories will not load until you reconnect and grant it.
+      <a href="{{ url_for('github.connect') }}">Reconnect GitHub</a>.
+    </div>
   {% endif %}
 
   <div id="github-rate-limit" class="github-rate-limit" role="status" aria-live="polite" hidden></div>

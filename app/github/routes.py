@@ -30,6 +30,7 @@ API (JSON)
 """
 
 import logging
+import re
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urlencode
 
@@ -58,6 +59,9 @@ from app.services.github import (
     validate_full_name,
     validate_path,
 )
+
+#: Shape of a valid ``owner/name`` repository identifier.
+_FULL_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
 #: Cap on the number of files whose last commit is resolved for the browser.
 #: The lookups are batched into one GraphQL request, but keeping the count
