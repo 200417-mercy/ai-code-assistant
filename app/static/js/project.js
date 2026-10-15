@@ -767,7 +767,8 @@
     if (!output || reviewsLoaded) return;
     reviewsLoaded = true;
     api("/reviews/api/reviews?project_id=" + PROJECT_ID)
-      .then(function (reviews) {
+      .then(function (data) {
+        var reviews = (data && data.items) || [];
         if (!reviews.length) {
           output.innerHTML =
             '<p class="sidebar-empty">No reviews yet. Open the review runner to run one.</p>';
