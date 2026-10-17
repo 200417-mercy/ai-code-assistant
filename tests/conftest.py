@@ -132,7 +132,12 @@ def _reset_alert_state():
     same alert in another. The reset is best-effort: modules that do not expose
     a reset hook are simply skipped.
     """
-    from app.services import alerts as alerts_service
+    try:
+        from app.services import alerts as alerts_service
+    except ImportError:
+        # The billing-alert service is optional while its implementation is
+        # still landing; its absence must not break collection of every test.
+        alerts_service = None
 
     reset = getattr(alerts_service, "reset", None)
     if callable(reset):
@@ -140,4 +145,3 @@ def _reset_alert_state():
     yield
     if callable(reset):
         reset()
-
