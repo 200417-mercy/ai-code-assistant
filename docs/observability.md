@@ -1,6 +1,12 @@
-# Observability
+# Observability design
 
-This document describes the observability surface of the system: the usage ledger, dashboards, metrics and logging. It covers the data flow, the exposed endpoints, and the configuration knobs that control each piece.
+> **Implementation status:** The ledger, metrics registry, endpoints, settings
+> and module/test paths below are proposed architecture, not implemented
+> interfaces in this revision. In particular, `LEDGER_MAX_RECORDS` is not an
+> active retention control. For what is stored and accessible today, see
+> [Usage and billing data privacy](usage-privacy.md).
+
+This document describes the proposed observability surface: the usage ledger, dashboards, metrics and logging. It covers the data flow, the exposed endpoints, and the configuration knobs that control each piece.
 
 ## Data flow
 
