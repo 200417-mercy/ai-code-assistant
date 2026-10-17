@@ -38,6 +38,7 @@ from app.models.review import (
 )
 from app.models.review_finding import CATEGORIES_BY_KIND, SEVERITIES
 from app.reviews import bp
+from app.services import chat_audit, usage_ledger
 from app.services import metrics as metrics_service
 from app.services import reviews as reviews_service
 from app.services.events import emit_event
@@ -416,6 +417,30 @@ def _save_result(review: Review, result: dict, config: dict) -> None:
     else:
         review.status = STATUS_COMPLETED
         review.error_message = None
+
+    # One ledger row per review run (success or failure), carrying the project
+    # scope, token counts, provider/model, request id, latency and outcome
+    # (issue #430, extended by #428).
+    usage = result.get("usage")
+    if not isinstance(usage, dict):
+        usage = {}
+    project = db.session.get(Project, review.project_id) if review.project_id else None
+    usage_ledger.record_usage(
+        source=usage_ledger.SOURCE_REVIEW,
+        prompt_tokens=usage.get("prompt_tokens", 0),
+        completion_tokens=usage.get("completion_tokens", 0),
+        total_tokens=usage.get("total_tokens"),
+        tokens_estimated=usage.get("tokens_estimated", True),
+        provider=usage.get("provider"),
+        model=usage.get("model"),
+        user_id=review.user_id,
+        project=project,
+        workspace_id=project.workspace_id if project else None,
+        request_id=chat_audit.current_request_id() or f"review:{review.id}",
+        latency_ms=usage.get("latency_ms"),
+        status=usage_ledger.STATUS_ERROR if error else usage_ledger.STATUS_SUCCESS,
+        commit=False,
+    )
     db.session.commit()
 
 
