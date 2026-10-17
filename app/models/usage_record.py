@@ -62,6 +62,14 @@ class UsageRecord(db.Model):
     #: Estimated cost in the configured display currency. ``None`` means the
     #: provider/model has no known price; it is never silently reported as zero.
     cost_estimate = db.Column(db.Float, nullable=True)
+    #: Correlation id shared with the request log (``X-Request-ID``). Nullable
+    #: because rows can be written by background/CLI work with no request.
+    request_id = db.Column(db.String(64), nullable=True, index=True)
+    #: End-to-end latency of the instrumented operation, in milliseconds.
+    latency_ms = db.Column(db.Integer, nullable=True)
+    #: Outcome of the operation: ``success``, ``error`` or ``denied``. Unknown
+    #: values are preserved so readers can group historical rows safely.
+    status = db.Column(db.String(20), nullable=True, index=True)
     created_at = db.Column(
         db.DateTime(timezone=True),
         nullable=False,
@@ -85,6 +93,9 @@ class UsageRecord(db.Model):
             "total_tokens": self.total_tokens,
             "tokens_estimated": bool(self.tokens_estimated),
             "cost_estimate": self.cost_estimate,
+            "request_id": self.request_id,
+            "latency_ms": self.latency_ms,
+            "status": self.status,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
 

@@ -10,14 +10,28 @@ The offline ``mock`` provider is the one entry that is not an estimate: it
 never calls a vendor and therefore always costs zero.
 
 Lookups are provider/model exact matches after normalizing case and
-surrounding whitespace. An unknown provider or model returns ``None`` rather
-than guessing, so callers can distinguish "free" from "we do not know".
+surrounding whitespace. A ``*`` wildcard may be used for the provider and/or
+model so an operator table can define a fallback rate; an exact entry always
+takes precedence over a wildcard. An unknown provider or model returns ``None``
+rather than guessing, so callers can distinguish "free" from "we do not know".
+
+Token counts passed to :func:`estimate_cost_usd` are clamped to
+:data:`MAX_TOKEN_COUNT` so an implausibly large (or malicious) count cannot
+produce an infinite estimate. Negative counts are still rejected.
 """
 
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from typing import Any
+
+#: Wildcard key understood by :func:`get_model_price`.
+WILDCARD = "*"
+
+#: Upper bound applied to each token count before costing. A completion with
+#: more tokens than this is almost certainly a bug or hostile input; clamping
+#: keeps the estimate finite without silently accepting an unbounded value.
+MAX_TOKEN_COUNT = 1_000_000_000
 
 #: Shown next to the table in docs/UI wherever costs are displayed.
 ESTIMATE_DISCLAIMER = (
@@ -93,34 +107,64 @@ def _normalize(value: str | None) -> str:
     return (value or "").strip().lower()
 
 
-def get_model_price(provider: str | None, model: str | None) -> ModelPrice | None:
-    """Return the default price entry for ``provider``/``model``, or ``None``.
+def _normalized_table(table=None) -> dict[tuple[str, str], ModelPrice]:
+    """Return ``table`` (default: the shipped table) with normalized keys."""
+    source = DEFAULT_PRICE_TABLE if table is None else table
+    return {
+        (_normalize(provider), _normalize(model)): price
+        for (provider, model), price in source.items()
+    }
 
-    Matching is case-insensitive and ignores surrounding whitespace. Unknown
-    combinations return ``None`` (cost unknown) rather than assuming zero.
+
+def get_model_price(
+    provider: str | None,
+    model: str | None,
+    *,
+    table=None,
+) -> ModelPrice | None:
+    """Return the price entry for ``provider``/``model``, or ``None``.
+
+    Matching is case-insensitive and ignores surrounding whitespace. An exact
+    provider/model entry always wins over a fallback, then the following
+    wildcard order is tried: ``(provider, "*")``, ``("*", model)`` and finally
+    ``("*", "*")``. Unknown combinations return ``None`` (cost unknown) rather
+    than assuming zero.
     """
-    return DEFAULT_PRICE_TABLE.get((_normalize(provider), _normalize(model)))
+    normalized = _normalized_table(table)
+    provider_key = _normalize(provider)
+    model_key = _normalize(model)
+    for key in (
+        (provider_key, model_key),
+        (provider_key, WILDCARD),
+        (WILDCARD, model_key),
+        (WILDCARD, WILDCARD),
+    ):
+        price = normalized.get(key)
+        if price is not None:
+            return price
+    return None
 
 
-def list_model_prices(provider: str | None = None) -> list[ModelPrice]:
-    """Return the default price entries, optionally filtered by ``provider``.
+def list_model_prices(provider: str | None = None, *, table=None) -> list[ModelPrice]:
+    """Return the price entries, optionally filtered by ``provider``.
 
     Results are sorted by provider then model so the table (and any API built
     on it) is stable across runs.
     """
     wanted = _normalize(provider)
+    normalized = _normalized_table(table)
     entries = [
         price
-        for (entry_provider, _), price in DEFAULT_PRICE_TABLE.items()
+        for (entry_provider, _), price in normalized.items()
         if not wanted or entry_provider == wanted
     ]
     return sorted(entries, key=lambda price: (price.provider, price.model))
 
 
-def price_table() -> dict[str, list[dict[str, Any]]]:
-    """Return the whole default table grouped by provider (JSON-friendly)."""
+def price_table(*, table=None) -> dict[str, list[dict[str, Any]]]:
+    """Return the whole table grouped by provider (JSON-friendly)."""
     grouped: dict[str, list[dict[str, Any]]] = {}
-    for price in list_model_prices():
+    for price in list_model_prices(table=table):
         grouped.setdefault(price.provider, []).append(price.to_dict())
     return grouped
 
@@ -131,18 +175,23 @@ def estimate_cost_usd(
     *,
     prompt_tokens: int = 0,
     completion_tokens: int = 0,
+    table=None,
 ) -> float | None:
     """Estimate USD cost for a completion, or ``None`` when the price is unknown.
 
     Token counts must be non-negative integers; anything else raises
     :class:`ValueError` so callers cannot silently report a negative cost.
+    Each count is clamped to :data:`MAX_TOKEN_COUNT` before the arithmetic so
+    an implausible value cannot overflow the estimate.
     """
     prompt = int(prompt_tokens)
     completion = int(completion_tokens)
     if prompt < 0 or completion < 0:
         raise ValueError("Token counts must be non-negative.")
+    prompt = min(prompt, MAX_TOKEN_COUNT)
+    completion = min(completion, MAX_TOKEN_COUNT)
 
-    price = get_model_price(provider, model)
+    price = get_model_price(provider, model, table=table)
     if price is None:
         return None
     return prompt / 1000 * price.input_per_1k_usd + completion / 1000 * price.output_per_1k_usd
@@ -151,6 +200,8 @@ def estimate_cost_usd(
 __all__ = [
     "DEFAULT_PRICE_TABLE",
     "ESTIMATE_DISCLAIMER",
+    "MAX_TOKEN_COUNT",
+    "WILDCARD",
     "ModelPrice",
     "estimate_cost_usd",
     "get_model_price",

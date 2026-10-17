@@ -103,6 +103,44 @@ class TestRecordUsage:
         with pytest.raises(ValueError):
             usage_ledger.record_usage(source="chat", cost_estimate=-0.1)
 
+    def test_records_request_latency_and_status(self, db):
+        record = usage_ledger.record_usage(
+            source="review",
+            provider="openai",
+            model="gpt-4o",
+            request_id="  req-123  ",
+            latency_ms=1250,
+            status="SUCCESS",
+        )
+
+        assert record.request_id == "req-123"
+        assert record.latency_ms == 1250
+        assert record.status == "success"
+        payload = record.to_dict()
+        assert payload["request_id"] == "req-123"
+        assert payload["latency_ms"] == 1250
+        assert payload["status"] == "success"
+
+    def test_correlation_fields_default_to_none(self, db):
+        record = usage_ledger.record_usage(source="tools", provider="mock", model="mock-1")
+
+        assert record.request_id is None
+        assert record.latency_ms is None
+        assert record.status is None
+        assert record.to_dict()["request_id"] is None
+
+    def test_request_id_is_bounded(self, db):
+        record = usage_ledger.record_usage(source="chat", request_id="x" * 200)
+
+        assert record.request_id is not None
+        assert len(record.request_id) == 64
+
+    def test_invalid_latency_is_rejected(self, db):
+        with pytest.raises(ValueError):
+            usage_ledger.record_usage(source="chat", latency_ms=-1)
+        with pytest.raises(ValueError):
+            usage_ledger.record_usage(source="chat", latency_ms="not-a-number")
+
 
 class TestBreakdown:
     def test_groups_known_and_unknown_sources(self, db, make_user):
@@ -289,3 +327,67 @@ class TestProjectInstrumentation:
             assert row.tokens_estimated is True
             assert row.provider == "mock"
             assert row.model == "mock-1"
+
+
+class TestReviewInstrumentation:
+    def test_each_review_records_a_scoped_review_row(self, client, db, make_user, login):
+        user, workspace, project = _project(
+            make_user,
+            login,
+            username="reviewuser",
+            email="reviewuser@example.com",
+        )
+
+        for kind in ("quality", "security"):
+            response = client.post(
+                "/reviews/api/reviews",
+                json={"source": "project", "project_id": project.id, "kind": kind},
+            )
+            assert response.status_code == 201
+
+        rows = UsageRecord.query.filter_by(source="review").order_by(UsageRecord.id).all()
+        assert len(rows) == 2
+        for row in rows:
+            assert row.user_id == user.id
+            assert row.workspace_id == workspace.id
+            assert row.project_id == project.id
+            assert row.total_tokens > 0
+            assert row.tokens_estimated is True
+            assert row.provider == "mock"
+            assert row.model == "mock-1"
+            assert row.status == usage_ledger.STATUS_SUCCESS
+            assert row.request_id
+            assert row.latency_ms is not None
+            assert row.latency_ms >= 0
+
+    def test_failed_review_records_an_error_row(self, client, db, make_user, login, monkeypatch):
+        from app.services.llm import LLMProviderError
+
+        _, workspace, project = _project(
+            make_user,
+            login,
+            username="failedreview",
+            email="failedreview@example.com",
+        )
+
+        def boom():
+            raise LLMProviderError("provider unavailable")
+
+        monkeypatch.setattr("app.services.reviews.get_provider", boom)
+        response = client.post(
+            "/reviews/api/reviews",
+            json={"source": "project", "project_id": project.id, "kind": "quality"},
+        )
+
+        assert response.status_code == 201
+        assert response.get_json()["status"] == "failed"
+        rows = UsageRecord.query.filter_by(source="review").all()
+        assert len(rows) == 1
+        row = rows[0]
+        assert row.workspace_id == workspace.id
+        assert row.project_id == project.id
+        assert row.total_tokens == 0
+        assert row.tokens_estimated is True
+        assert row.status == usage_ledger.STATUS_ERROR
+        assert row.request_id
+        assert row.latency_ms is not None

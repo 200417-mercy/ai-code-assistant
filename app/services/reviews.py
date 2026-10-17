@@ -22,12 +22,14 @@ from __future__ import annotations
 
 import json
 import re
+import time
 
 from app.models.review_finding import (
     CATEGORIES_BY_KIND,
     CONFIDENCES,
     SEVERITIES,
 )
+from app.services import token_usage
 from app.services.llm import LLMProviderError, get_provider
 
 _SEVERITY_RANK = {name: index for index, name in enumerate(SEVERITIES)}
@@ -583,6 +585,44 @@ def validate_review_result(result, *, kind: str, known_files=None, max_findings=
 # --------------------------------------------------------------------------
 
 
+def _usage_from_response(response, provider, messages) -> dict:
+    """Return ledger-ready usage plus provider/model metadata for a completion."""
+    usage = token_usage.usage_from_response(response, messages)
+    name = getattr(provider, "name", None)
+    model = getattr(response, "model", None) or getattr(provider, "model", None)
+    if not model:
+        models = getattr(provider, "models", ()) or ()
+        model = models[0] if models else None
+    # The offline provider derives counts from text and never reports vendor
+    # usage; treat it as estimated. Real providers may report only one side.
+    estimated = (
+        name == "mock"
+        or getattr(response, "prompt_tokens", None) is None
+        or getattr(response, "completion_tokens", None) is None
+    )
+    latency = getattr(response, "latency_seconds", None)
+    return {
+        **usage,
+        "provider": name,
+        "model": model,
+        "tokens_estimated": bool(estimated),
+        "latency_ms": (max(0, round(float(latency) * 1000)) if latency is not None else None),
+    }
+
+
+def _fallback_usage(provider, messages, text, latency_ms) -> dict:
+    """Estimate usage for providers/test doubles that only expose ``complete``."""
+    usage = token_usage.usage_from_text(token_usage.messages_text(messages), text)
+    models = getattr(provider, "models", ()) or ()
+    return {
+        **usage,
+        "provider": getattr(provider, "name", None),
+        "model": models[0] if models else None,
+        "tokens_estimated": True,
+        "latency_ms": latency_ms,
+    }
+
+
 def _run_json(
     prompt: str,
     *,
@@ -596,27 +636,53 @@ def _run_json(
     ``known_files`` (when supplied) is the allow-list of real file paths from
     the bounded review context; findings or ``files_affected`` entries outside
     it are rejected so the model cannot invent files.
+
+    The returned dict also carries a ``usage`` entry so the route layer can
+    append one ledger row per review, including the provider-reported (or
+    estimated) token counts, provider/model, latency and outcome.
     """
+    messages = [
+        {"role": "system", "content": _REVIEW_SYSTEM},
+        {"role": "user", "content": prompt},
+    ]
+    started = time.perf_counter()
+    provider = None
     try:
         provider = get_provider()
-        text = provider.complete(
-            [
-                {"role": "system", "content": _REVIEW_SYSTEM},
-                {"role": "user", "content": prompt},
-            ]
-        )
+        # ``chat`` preserves the provider's usage/latency metadata. Test
+        # doubles and older callers may only implement ``complete``.
+        chat = getattr(provider, "chat", None)
+        if callable(chat):
+            response = chat(messages)
+            text = response.content
+            usage = _usage_from_response(response, provider, messages)
+        else:
+            text = provider.complete(messages)
+            elapsed_ms = max(0, round((time.perf_counter() - started) * 1000))
+            usage = _fallback_usage(provider, messages, text, elapsed_ms)
     except LLMProviderError as exc:
+        elapsed_ms = max(0, round((time.perf_counter() - started) * 1000))
         return {
             "summary": {"overall_assessment": f"[review unavailable: {exc}]"},
             "findings": [],
             "raw": "",
             "error": str(exc),
             "known_files": list(known_files) if known_files is not None else None,
+            "usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+                "provider": getattr(provider, "name", None),
+                "model": (getattr(provider, "models", ()) or (None,))[0],
+                "tokens_estimated": True,
+                "latency_ms": elapsed_ms,
+            },
         }
     parsed = parse_review_response(
         text, kind=kind, threshold=threshold, known_files=known_files, max_findings=max_findings
     )
     parsed["error"] = None
+    parsed["usage"] = usage
     return parsed
 
 
