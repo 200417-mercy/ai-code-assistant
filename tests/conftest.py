@@ -121,3 +121,23 @@ def login(client):
         )
 
     return _login
+
+
+@pytest.fixture(autouse=True)
+def _reset_alert_state():
+    """Clear alert dedupe / dispatch state around each test.
+
+    Alert services may keep process-local memory of already-emitted notifications
+    (dedupe keys). Reset it so alerts emitted in one test do not suppress the
+    same alert in another. The reset is best-effort: modules that do not expose
+    a reset hook are simply skipped.
+    """
+    from app.services import alerts as alerts_service
+
+    reset = getattr(alerts_service, "reset", None)
+    if callable(reset):
+        reset()
+    yield
+    if callable(reset):
+        reset()
+
