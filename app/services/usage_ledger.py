@@ -40,6 +40,12 @@ UNKNOWN_SOURCE = "unknown"
 BACKFILL_DEFAULT_BATCH_SIZE = 500
 BACKFILL_MAX_BATCH_SIZE = 5000
 
+#: ``request_id`` prefix used to make backfilled rows idempotent per message.
+#: The ledger predates a dedicated ``message_id`` column, so a stable sentinel
+#: in the existing correlation field identifies the source message without a
+#: schema change. It stays well under the 64-character limit.
+BACKFILL_REQUEST_PREFIX = "backfill:message:"
+
 #: Operation outcomes understood by the ledger (see docs/observability.md).
 STATUS_SUCCESS = "success"
 STATUS_ERROR = "error"
@@ -143,8 +149,19 @@ def current_provider_metadata(user=None) -> tuple[str | None, str | None]:
         return None, None
 
 
-def estimate_cost(provider, model, prompt_tokens: int, completion_tokens: int) -> float | None:
-    """Estimate cost with the default price table, returning ``None`` if unknown."""
+def estimate_cost(
+    provider,
+    model,
+    prompt_tokens: int,
+    completion_tokens: int,
+    *,
+    workspace_id=None,
+) -> float | None:
+    """Estimate cost, using workspace overrides when known.
+
+    Returns ``None`` when the provider/model has no price, so an unknown model
+    is never silently recorded as free.
+    """
     if not provider or not model:
         return None
     return pricing.estimate_cost_usd(
@@ -152,6 +169,7 @@ def estimate_cost(provider, model, prompt_tokens: int, completion_tokens: int) -
         model,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
+        workspace_id=workspace_id,
     )
 
 
@@ -198,9 +216,21 @@ def record_usage(
     if status:
         status = status.lower()
 
+    # Scope objects take precedence over their explicit id counterparts.
+    resolved_workspace_id = (
+        _object_id(workspace) or workspace_id or _object_id(project, "workspace_id")
+    )
+    resolved_user_id = _object_id(user) or user_id
+    resolved_project_id = _object_id(project) or project_id
+    resolved_conversation_id = _object_id(conversation) or conversation_id
+
     if cost_estimate is None:
         cost_estimate = estimate_cost(
-            provider, model, counts["prompt_tokens"], counts["completion_tokens"]
+            provider,
+            model,
+            counts["prompt_tokens"],
+            counts["completion_tokens"],
+            workspace_id=resolved_workspace_id,
         )
     else:
         try:
@@ -211,10 +241,10 @@ def record_usage(
             raise ValueError("cost_estimate must be non-negative.")
 
     record = UsageRecord(
-        user_id=_object_id(user) or user_id,
-        workspace_id=_object_id(workspace) or workspace_id or _object_id(project, "workspace_id"),
-        project_id=_object_id(project) or project_id,
-        conversation_id=_object_id(conversation) or conversation_id,
+        user_id=resolved_user_id,
+        workspace_id=resolved_workspace_id,
+        project_id=resolved_project_id,
+        conversation_id=resolved_conversation_id,
         source=normalize_source(source) or UNKNOWN_SOURCE,
         provider=provider,
         model=model,
@@ -352,11 +382,17 @@ def _backfill_record_exists(
 ) -> bool:
     """Return ``True`` when this message was already copied into the ledger.
 
-    The ledger predates a durable ``message_id`` column, so a backfilled row is
-    identified by its source, conversation, token counts, and the original
-    message timestamp. That tuple is stable across runs, which makes the
-    command idempotent without changing or annotating historical message rows.
+    A backfilled row carries a stable ``backfill:message:<id>`` sentinel in the
+    existing ``request_id`` column, so two messages with identical counts and
+    timestamps are still tracked independently. Rows written by older versions
+    (before the sentinel existed) are also recognised by the historical tuple
+    of source, conversation, counts, and message timestamp.
     """
+    if message.id is not None:
+        sentinel = f"{BACKFILL_REQUEST_PREFIX}{message.id}"
+        if UsageRecord.query.filter_by(source=SOURCE_CHAT, request_id=sentinel).first() is not None:
+            return True
+
     if message.created_at is None:
         return False
     return (
@@ -367,6 +403,7 @@ def _backfill_record_exists(
             prompt_tokens=counts["prompt_tokens"],
             completion_tokens=counts["completion_tokens"],
             total_tokens=counts["total_tokens"],
+            request_id=None,
         )
         .filter(UsageRecord.created_at == message.created_at)
         .first()
@@ -470,6 +507,7 @@ def backfill_from_messages(
                     tokens_estimated=True,
                     user_id=conversation.user_id,
                     conversation_id=message.conversation_id,
+                    request_id=f"{BACKFILL_REQUEST_PREFIX}{message.id}",
                     commit=False,
                 )
                 record.created_at = message.created_at
@@ -489,6 +527,7 @@ def backfill_from_messages(
 __all__ = [
     "BACKFILL_DEFAULT_BATCH_SIZE",
     "BACKFILL_MAX_BATCH_SIZE",
+    "BACKFILL_REQUEST_PREFIX",
     "SOURCES",
     "SOURCE_ANALYSIS",
     "SOURCE_CHAT",

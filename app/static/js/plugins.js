@@ -81,7 +81,9 @@
       stateBadge = '<span class="project-status project-status-error">disabled</span>';
     }
 
-    var actions = "";
+    var actions =
+      '<a class="btn btn-ghost btn-sm" href="/plugins/workspaces/' + WORKSPACE_ID +
+      "/plugins/" + encodeURIComponent(plugin.id) + '">Details</a> ';
     if (IS_OWNER) {
       if (plugin.installed) {
         if (!plugin.enabled) {
@@ -94,10 +96,10 @@
           capabilityChips(plugin.granted_capabilities) +
           "</span>";
       } else {
-        actions = '<span class="activity-meta">installed in another workspace or not yet installed</span>';
+        actions += '<span class="activity-meta">installed in another workspace or not yet installed</span>';
       }
     } else {
-      actions = '<span class="activity-meta">owner can manage</span>';
+      actions += '<span class="activity-meta">owner can manage</span>';
     }
 
     return (

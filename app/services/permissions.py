@@ -66,6 +66,7 @@ CAPABILITIES: dict[str, tuple[tuple[str, ...], str]] = {
         "Report presence in the workspace",
     ),
     "manage_plugins": ((ROLE_OWNER,), "Install, enable, disable, and grant plugin capabilities"),
+    "manage_billing": ((ROLE_OWNER,), "Manage workspace price overrides and billing estimates"),
 }
 
 

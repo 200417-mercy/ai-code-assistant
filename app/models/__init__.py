@@ -35,6 +35,7 @@ from app.models.usage_record import UsageRecord
 from app.models.user import User
 from app.models.workspace import Workspace
 from app.models.workspace_member import WorkspaceMember
+from app.models.workspace_price_override import PriceOverride, WorkspacePriceOverride
 from app.models.workspace_settings import WorkspaceSettings
 
 __all__ = [
@@ -55,6 +56,7 @@ __all__ = [
     "PluginErrorReport",
     "PluginInstallation",
     "PluginLockEntry",
+    "PriceOverride",
     "Project",
     "ProjectChatSession",
     "ProjectComment",
@@ -72,5 +74,6 @@ __all__ = [
     "Workspace",
     "WorkspaceInvitation",
     "WorkspaceMember",
+    "WorkspacePriceOverride",
     "WorkspaceSettings",
 ]

@@ -276,9 +276,26 @@ def guarded_request(
     client = session or requests.Session()
     response = client.request(method, safe_url, **kwargs)
 
+    # Redirects are never followed (``allow_redirects=False``) and a redirect
+    # response is refused outright: otherwise a plugin could read ``Location``
+    # and make a second, separately guarded request that bypasses this call's
+    # checks. Refusing here keeps every outbound target behind the guard.
+    if getattr(response, "is_redirect", False) or (
+        isinstance(getattr(response, "status_code", None), int)
+        and 300 <= response.status_code < 400
+    ):
+        raise PluginNetworkError("Plugin network requests must not redirect")
+
     limit = max_bytes if max_bytes is not None else active.max_bytes
     declared = response.headers.get("Content-Length")
     if declared is not None and declared.isdigit() and int(declared) > limit:
+        raise PluginNetworkError(f"Plugin response exceeds the {limit} byte cap")
+
+    # A chunked response has no Content-Length, so also check the body the
+    # transport actually returned. This is the last line of defence for the
+    # bounded-response contract.
+    body = getattr(response, "content", None)
+    if isinstance(body, (bytes, bytearray)) and len(body) > limit:
         raise PluginNetworkError(f"Plugin response exceeds the {limit} byte cap")
     return response
 
