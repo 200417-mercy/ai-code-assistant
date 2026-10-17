@@ -34,7 +34,8 @@ from dataclasses import dataclass, field
 from importlib import metadata
 
 from packaging.requirements import InvalidRequirement, Requirement
-from packaging.version import InvalidVersion, Version
+
+from app.services.plugin_versions import InvalidPluginVersionError, parse_version
 
 logger = logging.getLogger(__name__)
 
@@ -203,8 +204,8 @@ class DependencyResolver:
             ) from None
 
         try:
-            version = Version(installed)
-        except InvalidVersion:
+            version = parse_version(installed)
+        except InvalidPluginVersionError:
             raise PluginDependencyVersionError(
                 root_id,
                 f"dependency '{requirement}' cannot be checked against "

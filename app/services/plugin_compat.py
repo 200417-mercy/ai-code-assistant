@@ -28,6 +28,8 @@ from pathlib import Path
 
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 
+from app.services.plugin_versions import InvalidPluginVersionError, parse_version
+
 logger = logging.getLogger(__name__)
 
 #: Value used when the application version cannot be determined. Kept as a
@@ -101,11 +103,11 @@ def plugin_compatible(compatibility: str | None, version: str | None = None) -> 
     """
     try:
         specifier = parse_compatibility(compatibility)
-        target = (version or "").strip() or app_version()
+        target = parse_version((version or "").strip() or app_version())
         return specifier.contains(target, prereleases=True)
-    except InvalidCompatibilityError:
+    except (InvalidCompatibilityError, InvalidPluginVersionError):
         return False
-    except ValueError:  # unparseable application version -> not compatible
+    except ValueError:  # additional defensive fallback -> not compatible
         return False
 
 
