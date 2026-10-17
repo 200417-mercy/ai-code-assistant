@@ -65,7 +65,8 @@ Open http://localhost:5000 in your browser.
 - [Architecture](docs/architecture.md)
 - [Security model](docs/security.md)
 - [Soroban workflow guide](docs/soroban-workflow.md)
-- [Observability](docs/observability.md)
+- [Observability design](docs/observability.md)
+- [Usage and billing data privacy](docs/usage-privacy.md)
 - [Roadmap](https://github.com/AyindxLab/ai-code-assistant/issues)
 
 ## License
