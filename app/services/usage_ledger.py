@@ -40,6 +40,11 @@ UNKNOWN_SOURCE = "unknown"
 BACKFILL_DEFAULT_BATCH_SIZE = 500
 BACKFILL_MAX_BATCH_SIZE = 5000
 
+#: Operation outcomes understood by the ledger (see docs/observability.md).
+STATUS_SUCCESS = "success"
+STATUS_ERROR = "error"
+STATUS_DENIED = "denied"
+
 
 def normalize_source(source: Any) -> str | None:
     """Return the lowercase source label, or ``None`` when it is missing."""
@@ -66,6 +71,29 @@ def _non_negative_int(value, name: str) -> int:
     if count < 0:
         raise ValueError(f"{name} must be non-negative.")
     return count
+
+
+def _optional_non_negative_int(value, name: str) -> int | None:
+    """Coerce an optional measurement to a non-negative integer, or ``None``."""
+    if value in (None, ""):
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be an integer.") from exc
+    if number < 0:
+        raise ValueError(f"{name} must be non-negative.")
+    return number
+
+
+def _optional_text(value, name: str, limit: int) -> str | None:
+    """Normalize an optional short string field, or return ``None``."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    return text[:limit]
 
 
 def normalize_usage(prompt_tokens=0, completion_tokens=0, total_tokens=None) -> dict[str, int]:
@@ -145,6 +173,9 @@ def record_usage(
     model: str | None = None,
     tokens_estimated: bool = True,
     cost_estimate=None,
+    request_id: str | None = None,
+    latency_ms=None,
+    status: str | None = None,
     commit: bool = True,
 ) -> UsageRecord:
     """Append one usage record and return it.
@@ -152,10 +183,20 @@ def record_usage(
     Scope objects take precedence over their explicit id counterparts. Cost is
     estimated from the configured price table when the caller does not supply a
     value; an unknown provider/model leaves it as ``None`` rather than zero.
+
+    ``request_id``, ``latency_ms`` and ``status`` are optional correlation and
+    performance fields. They default to ``None`` (the operation did not report
+    them) and are validated so a malformed provider payload cannot write a
+    negative latency or an over-long id into the ledger.
     """
     counts = normalize_usage(prompt_tokens, completion_tokens, total_tokens)
     provider = (str(provider).strip()[:50] or None) if provider else None
     model = (str(model).strip()[:100] or None) if model else None
+    request_id = _optional_text(request_id, "request_id", 64)
+    latency_ms = _optional_non_negative_int(latency_ms, "latency_ms")
+    status = _optional_text(status, "status", 20)
+    if status:
+        status = status.lower()
 
     if cost_estimate is None:
         cost_estimate = estimate_cost(
@@ -182,6 +223,9 @@ def record_usage(
         total_tokens=counts["total_tokens"],
         tokens_estimated=bool(tokens_estimated),
         cost_estimate=cost_estimate,
+        request_id=request_id,
+        latency_ms=latency_ms,
+        status=status,
     )
     db.session.add(record)
     if commit:
@@ -451,6 +495,9 @@ __all__ = [
     "SOURCE_PROJECT_CHAT",
     "SOURCE_REVIEW",
     "SOURCE_TOOLS",
+    "STATUS_DENIED",
+    "STATUS_ERROR",
+    "STATUS_SUCCESS",
     "UNKNOWN_SOURCE",
     "backfill_from_messages",
     "breakdown_by_source",
