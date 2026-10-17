@@ -122,6 +122,13 @@ class Config:
     # discoverable plugins.
     PLUGIN_DISCOVERY_DIR = os.getenv("PLUGIN_DISCOVERY_DIR", str(BASE_DIR / "plugins"))
 
+    # Plugin execution budget (#408). Event handlers and lifecycle hooks run in
+    # a daemon thread and are abandoned once they exceed this many seconds, so
+    # one slow plugin cannot stall a request. The timeout is recorded as a
+    # bounded error report and dispatch continues with the remaining handlers.
+    # Set to 0 (or negative) to disable the bound for local debugging.
+    PLUGIN_EXECUTION_TIMEOUT = float(os.getenv("PLUGIN_EXECUTION_TIMEOUT", "5"))
+
     # Plugin outbound network policy (#193). Every plugin-triggered request must
     # pass ``app.services.plugin_network``: it is https-only, denies
     # private/loopback/link-local/reserved targets by default, and only reaches

@@ -183,7 +183,7 @@ class TestBudgetAlertDeduplication:
         alerts = check_budget_alerts(workspace.id, spend=150, limit=100, period="2024-01")
         assert len(alerts) == 0
 
-    def test_new_period_resets_deduplication(self/ app, make_user):
+    def test_new_period_resets_deduplication(self, app, make_user):
         from app.services.budget_alerts import check_budget_alerts
 
         user = make_user()
