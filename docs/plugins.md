@@ -74,6 +74,9 @@ separated ranges). Enforcement lives in
 - **Invalid** specifier → the manifest is rejected during validation.
 - **Incompatible** range → installation is refused with a clear message naming
   the required range and the current app version.
+- **Updates are gated too**: `POST .../plugins/<plugin_id>/update` refuses a
+  manifest whose range excludes the running version *before* writing anything,
+  so an incompatible release can never replace a working installation.
 - Compatible plugins register normally, and the management API exposes a
   compatibility badge in plugin metadata (`compatibility`,
   `compatible_with_app`, and `app_version`).
@@ -185,6 +188,23 @@ Per-workspace lifecycle is also observable through the dispatcher events
 enable/disable and an owner-only `uninstall` action that revokes every
 workspace capability grant and removes the workspace installation.
 
+### Execution timeout (#408)
+
+Plugin event handlers and lifecycle hooks run with a bounded execution budget
+(`app/services/plugin_execution.py`). The budget is
+`PLUGIN_EXECUTION_TIMEOUT` seconds (default `5`; `0` or negative disables it):
+
+- the callback runs in a short-lived daemon thread while the request waits;
+- if it overruns, the dispatcher **stops waiting**, records one bounded error
+  report (`plugin_error_reports`, operation `dispatch:<event>` or
+  `hook:<hook>`), and continues with the next handler or lifecycle step;
+- state changes still land: enabling/disabling always completes, and dispatch
+  keeps running the remaining subscribers.
+
+Python cannot interrupt a thread, so an over-budget callback is **abandoned**
+rather than killed. It may still finish in the background, which is why plugin
+code must be idempotent and must not depend on being stopped.
+
 ## Plugin management (API + UI)
 
 ### Operator CLI
@@ -227,6 +247,7 @@ management operations.
 | `GET`  | `/plugins/api/workspaces/<id>/plugins` | List plugins + installation state | any member |
 | `GET`  | `/plugins/api/workspaces/<id>/plugins/<plugin_id>` | Inspect one plugin | any member |
 | `POST` | `/plugins/api/workspaces/<id>/plugins/install` | Install a trusted/local manifest | owner |
+| `POST` | `/plugins/api/workspaces/<id>/plugins/<plugin_id>/update` | Update a registered plugin from a manifest (compatibility-gated) | owner |
 | `POST` | `/plugins/api/workspaces/<id>/plugins/<plugin_id>/enable` | Enable the workspace installation | owner |
 | `POST` | `/plugins/api/workspaces/<id>/plugins/<plugin_id>/disable` | Disable the workspace installation | owner |
 | `POST` | `/plugins/api/workspaces/<id>/plugins/<plugin_id>/capabilities` | Explicitly grant/revoke capabilities (`{"grant": [...], "revoke": [...]}`) | owner |
@@ -248,6 +269,26 @@ validated manifest — a client cannot override it (identity binding). Installin
 Capabilities granted through the API must be declared in the plugin's manifest
 (declared vs granted are kept distinct). The `manage_plugins` role gate is the
 only way to grant/revoke through the UI; grants are never implicit.
+
+### Updating a plugin
+
+`POST .../plugins/<plugin_id>/update` accepts the same `{"manifest": {...}}`
+shape as install, but applies it to an already-registered plugin. The manifest
+is validated and identity-bound:
+
+- `id` must equal the plugin being updated;
+- `entry_point` must not change (`409`), so an update can never point an
+  installed plugin at different code;
+- the declared PEP 440 `compatibility` range is enforced against the running
+  application version **before** anything is written. An incompatible range is
+  refused with `400` and a message naming both the range and the current
+  version; the registered plugin and its workspace installations are left
+  untouched.
+
+Updates change the plugin's metadata (version, description, capabilities,
+dependencies, configuration defaults, trust fields) but never capability grants
+or per-workspace configuration, which stay explicit and workspace-scoped. The
+plugin must be installed in the authorizing workspace (`404` otherwise).
 
 ### Enable / disable
 
@@ -280,10 +321,11 @@ plugin id, the operation (`dispatch:<event_type>`, `hook:<hook>`, …), the
 exception type, and a length-bounded message. **No stack traces, event
 payloads, or secrets are stored by default.**
 
-Recording happens automatically when a plugin dispatch handler raises and when
-a lifecycle hook fails inside an app context; it is best-effort and never
-changes the existing failure-isolation behavior. Reports are read back
-owner-scoped via `GET /plugins/api/workspaces/<ws>/plugin-errors` (owner only,
+Recording happens automatically when a plugin dispatch handler raises (including
+when it exceeds `PLUGIN_EXECUTION_TIMEOUT`) and when a lifecycle hook fails or
+times out inside an app context; it is best-effort and never changes the
+existing failure-isolation behavior. Reports are read back owner-scoped via
+`GET /plugins/api/workspaces/<ws>/plugin-errors` (owner only,
 workspace-isolated) and operator-wide via `flask plugins errors [--json]`.
 
 ## Audit trail (capabilities & state)
@@ -363,6 +405,21 @@ it recorded. Subscribing never requires a capability grant; grants are enforced
 only when the host dispatches a live event (see [Security](#security)). The
 manifest schema and the load/register flow are covered by
 `tests/test_hello_plugin_example.py`.
+
+### Stellar notifier example (#415)
+
+[`examples/plugins/stellar_notifier/`](../examples/plugins/stellar_notifier)
+shows an event-driven, read-only integration for Stellar analysis:
+
+- declares `STELLAR_READ` and subscribes to `stellar.analysis.completed`;
+- formats a one-line summary (`Project 7 — Stellar detected, confidence 0.98`)
+  that is capped at `MAX_SUMMARY_CHARS`, with each field truncated and the
+  in-memory history bounded to `MAX_RECENT_SUMMARIES`;
+- copies the payload instead of mutating it and makes **no network or database
+  calls**, so it runs offline under the mock network;
+- is validated end-to-end by
+  `tests/test_stellar_notifier_example.py` (schema, load/register, event path,
+  bounding, read-only behaviour, and an offline socket guard).
 
 ## Security
 

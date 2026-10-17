@@ -26,6 +26,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from app.services.plugin_compat import is_valid_compatibility
 from app.services.plugin_deps import PluginRef
+from app.services.plugin_execution import run_with_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -498,7 +499,7 @@ class Plugin:
         if not callable(method):
             return {"hook": hook, "called": False, "ok": True, "error": None}
         try:
-            method()
+            run_with_timeout(method, operation=f"hook:{hook}")
         except Exception as exc:
             logger.error(
                 "Plugin %s hook %s failed: %s",

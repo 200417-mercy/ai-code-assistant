@@ -24,10 +24,21 @@ from app.services.capabilities import Capability, CapabilityStore
 from app.services.events import emit_event
 from app.services.permissions import require_workspace_capability, resolve_workspace, role_for
 from app.services.plugin_audit import record_plugin_audit
-from app.services.plugin_compat import compatibility_status
+from app.services.plugin_compat import (
+    IncompatibleCompatibilityError,
+    InvalidCompatibilityError,
+    compatibility_status,
+    enforce_compatible,
+)
 from app.services.plugin_config import validate_plugin_config
 from app.services.plugin_errors import list_workspace_error_reports
-from app.services.plugin_ops import discover_plugins
+from app.services.plugin_ops import (
+    PluginEntryPointMismatchError,
+    PluginNotFoundError,
+    PluginUpdateError,
+    discover_plugins,
+    update_plugin,
+)
 from app.services.plugins import ManifestValidationError, PluginError, PluginManifest
 
 
@@ -204,21 +215,10 @@ def api_install_plugin(workspace_id: int):
 
     # Reject a plugin whose explicit PEP 440 compatibility range does not
     # include the running application version (an absent field is unrestricted).
-    if manifest.compatibility is not None:
-        status = compatibility_status(manifest.compatibility)
-        if not status["compatible"]:
-            return (
-                jsonify(
-                    {
-                        "error": (
-                            f"Plugin {manifest.id} requires application "
-                            f"{manifest.compatibility}, but this app is "
-                            f"{status['app_version']}."
-                        )
-                    }
-                ),
-                400,
-            )
+    try:
+        enforce_compatible(manifest.compatibility, subject=f"Plugin {manifest.id}")
+    except (IncompatibleCompatibilityError, InvalidCompatibilityError) as exc:
+        return jsonify({"error": str(exc)}), 400
 
     plugin = Plugin.query.filter_by(id=manifest.id).first()
     if plugin is None:
@@ -260,6 +260,61 @@ def api_install_plugin(workspace_id: int):
         return jsonify({"error": "Plugin is already installed in this workspace."}), 409
 
     return jsonify(_serialize(plugin, workspace_id)), 201
+
+
+@bp.route("/api/workspaces/<int:workspace_id>/plugins/<plugin_id>/update", methods=["POST"])
+@login_required
+@require_workspace_capability("manage_plugins")
+def api_update_plugin(workspace_id: int, plugin_id: str):
+    """Update a registered plugin from a validated manifest (owner only).
+
+    The manifest is fully validated and identity-bound: its ``id`` must match
+    the plugin being updated and its ``entry_point`` must not change, so an
+    update can never point an installed plugin at different code. The declared
+    PEP 440 ``compatibility`` range is enforced before anything is written; an
+    update that excludes the running application version is refused with
+    ``400`` and a message naming both the range and the current version. The
+    registered plugin (and every workspace installation) is left untouched.
+
+    Capabilities and per-workspace configuration are not modified by an update;
+    grants stay explicit and workspace-scoped.
+    """
+    installation = _installation(plugin_id, workspace_id)
+    if installation is None:
+        return jsonify({"error": "Plugin is not installed in this workspace."}), 404
+
+    data = request.get_json(silent=True) or {}
+    manifest_data = data.get("manifest")
+    if not isinstance(manifest_data, dict):
+        return jsonify({"error": "A manifest object is required."}), 400
+
+    try:
+        manifest = PluginManifest.from_dict(
+            manifest_data,
+            trusted_publishers=current_app.config["PLUGIN_TRUSTED_KEYS"],
+            trust_policy=current_app.config["PLUGIN_TRUST_POLICY"],
+        )
+    except ManifestValidationError as exc:
+        return jsonify({"error": f"Invalid plugin manifest: {exc}"}), 400
+    except PluginError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    try:
+        plugin = update_plugin(plugin_id, manifest)
+    except (IncompatibleCompatibilityError, InvalidCompatibilityError) as exc:
+        db.session.rollback()
+        return jsonify({"error": str(exc)}), 400
+    except PluginEntryPointMismatchError as exc:
+        db.session.rollback()
+        return jsonify({"error": str(exc)}), 409
+    except PluginUpdateError as exc:
+        db.session.rollback()
+        return jsonify({"error": str(exc)}), 400
+    except PluginNotFoundError:
+        db.session.rollback()
+        return jsonify({"error": "Plugin not found."}), 404
+
+    return jsonify(_serialize(plugin, workspace_id))
 
 
 @bp.route("/api/workspaces/<int:workspace_id>/plugins/<plugin_id>/enable", methods=["POST"])
