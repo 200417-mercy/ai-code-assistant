@@ -534,9 +534,12 @@
   // Pre-flight token/cost estimate (issue #104). Best-effort: failures clear
   // the hint rather than surfacing an error, so typing is never interrupted.
   function formatEstimate(estimate) {
+    if (window.AICACurrency && typeof window.AICACurrency.formatEstimate === "function") {
+      return window.AICACurrency.formatEstimate(estimate);
+    }
     var tokens = Number(estimate && estimate.prompt_tokens) || 0;
     var cost = Number(estimate && estimate.estimated_cost_usd) || 0;
-    return "Estimated: ~" + tokens.toLocaleString() + " tokens (~$" + cost.toFixed(4) + ")";
+    return "Estimated: ~" + tokens.toLocaleString() + " tokens (~$" + cost.toFixed(4) + " USD; estimate)";
   }
 
   var chatEstimateTimer = null;

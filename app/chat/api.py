@@ -8,6 +8,7 @@ Machine-facing REST surface for the chat feature:
     POST   /api/conversations/<id>/messages        send a message (LLM reply)
     DELETE /api/conversations/<id>                 delete (cascade)
     GET    /api/usage                              per-user token usage summary
+    GET    /api/usage/breakdown                    usage and cost by source
 
 All routes require authentication and are owner-scoped. Errors use RFC 7807
 (``application/problem+json``) documents so API clients never receive HTML error
@@ -26,7 +27,8 @@ from flask_login import current_user
 from app.chat import routes as chat_routes
 from app.extensions import db
 from app.models import Conversation, Message
-from app.services import ratelimit, streaming
+from app.services import ratelimit, streaming, usage_ledger
+from app.services.currency import get_currency_config
 from app.services.llm import LLMProviderError, provider_status
 from app.services.provider_config import ProviderSettingsError, apply_settings, build_provider
 from app.services.providers.retry import RetryingProvider
@@ -294,3 +296,26 @@ def usage_summary():
             "total_tokens": total,
         }
     )
+
+
+@bp.route("/usage/breakdown", methods=["GET"])
+@_login_required
+@_rate_limit("usage")
+def usage_breakdown():
+    """Return usage counts and estimated cost grouped by ledger source.
+
+    The authenticated user's records are always the outer scope, so an optional
+    ``workspace_id`` or ``project_id`` filter can never expose another account's
+    usage. Unknown historical sources are grouped under ``unknown`` rather than
+    dropped or causing a 500.
+    """
+    workspace_id = request.args.get("workspace_id", type=int)
+    project_id = request.args.get("project_id", type=int)
+    payload = usage_ledger.breakdown_payload(
+        user_id=current_user.id,
+        workspace_id=workspace_id,
+        project_id=project_id,
+    )
+    payload["currency"] = get_currency_config()
+    payload["cost_is_estimate"] = True
+    return jsonify(payload)
