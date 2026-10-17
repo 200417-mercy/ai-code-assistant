@@ -1,0 +1,291 @@
+"""Tests for the central usage ledger and its source breakdown API (Phase 10).
+
+Covers recording/normalisation/scoping (issues #429, #432), aggregation by
+source including unknown historical values (#451), and the instrumentation of
+project chat and project analysis.
+"""
+
+import pytest
+
+from app.extensions import db
+from app.models import Project, ProjectFile, UsageRecord, Workspace
+from app.models.project import SOURCE_ARCHIVE, STATUS_READY
+from app.services import usage_ledger
+
+
+def _project(make_user, login, username="ledgeruser", email="ledgeruser@example.com"):
+    user = make_user(username=username, email=email)
+    login(email=email)
+    workspace = Workspace(user_id=user.id, name="Ledger workspace")
+    db.session.add(workspace)
+    db.session.commit()
+    project = Project(
+        workspace_id=workspace.id,
+        user_id=user.id,
+        name="Ledger project",
+        source=SOURCE_ARCHIVE,
+        status=STATUS_READY,
+    )
+    db.session.add(project)
+    db.session.commit()
+    db.session.add(
+        ProjectFile(
+            project_id=project.id,
+            path="app.py",
+            size=12,
+            is_binary=False,
+            content="def main(): pass\n",
+        )
+    )
+    db.session.commit()
+    return user, workspace, project
+
+
+class TestRecordUsage:
+    def test_records_counts_scope_and_cost(self, db, make_user):
+        user = make_user(username="ledger", email="ledger@example.com")
+        workspace = Workspace(user_id=user.id, name="W")
+        db.session.add(workspace)
+        db.session.commit()
+        project = Project(
+            workspace_id=workspace.id,
+            user_id=user.id,
+            name="P",
+            source=SOURCE_ARCHIVE,
+            status=STATUS_READY,
+        )
+        db.session.add(project)
+        db.session.commit()
+
+        record = usage_ledger.record_usage(
+            source=" Analysis ",
+            prompt_tokens=100,
+            completion_tokens=50,
+            user=user,
+            project=project,
+            provider="openai",
+            model="gpt-4o",
+            tokens_estimated=True,
+        )
+
+        assert record.id is not None
+        assert record.source == "analysis"
+        assert record.workspace_id == workspace.id
+        assert record.project_id == project.id
+        assert record.user_id == user.id
+        assert record.prompt_tokens == 100
+        assert record.completion_tokens == 50
+        assert record.total_tokens == 150
+        assert record.tokens_estimated is True
+        assert record.cost_estimate == pytest.approx(0.00075)
+
+    def test_missing_counts_default_to_zero(self, db):
+        record = usage_ledger.record_usage(source="tools", provider="mock", model="mock-1")
+        assert record.prompt_tokens == 0
+        assert record.completion_tokens == 0
+        assert record.total_tokens == 0
+        assert record.cost_estimate == 0.0
+
+    def test_unknown_model_cost_stays_unknown(self, db):
+        record = usage_ledger.record_usage(
+            source="chat",
+            prompt_tokens=10,
+            provider="openai",
+            model="not-a-real-model",
+        )
+        assert record.cost_estimate is None
+
+    def test_negative_counts_are_rejected(self, db):
+        with pytest.raises(ValueError):
+            usage_ledger.record_usage(source="chat", prompt_tokens=-1)
+        with pytest.raises(ValueError):
+            usage_ledger.record_usage(source="chat", completion_tokens=-1)
+        with pytest.raises(ValueError):
+            usage_ledger.record_usage(source="chat", cost_estimate=-0.1)
+
+
+class TestBreakdown:
+    def test_groups_known_and_unknown_sources(self, db, make_user):
+        owner = make_user(username="owner", email="owner@example.com")
+        other = make_user(username="other", email="other@example.com")
+
+        rows = [
+            ("chat", 10, 5),
+            ("chat", 1, 1),
+            ("analysis", 20, 10),
+            ("project_chat", 3, 2),
+            ("review", 0, 4),
+            ("tools", 5, 0),
+            ("legacy-source", 7, 7),
+        ]
+        for source, prompt, completion in rows:
+            usage_ledger.record_usage(
+                source=source,
+                prompt_tokens=prompt,
+                completion_tokens=completion,
+                user=owner,
+                provider="mock",
+                model="mock-1",
+            )
+        usage_ledger.record_usage(
+            source="chat",
+            prompt_tokens=999,
+            completion_tokens=999,
+            user=other,
+            provider="mock",
+            model="mock-1",
+        )
+
+        breakdown = usage_ledger.breakdown_by_source(user_id=owner.id)
+
+        assert breakdown["chat"]["count"] == 2
+        assert breakdown["chat"]["prompt_tokens"] == 11
+        assert breakdown["chat"]["total_tokens"] == 17
+        assert breakdown["analysis"]["count"] == 1
+        assert breakdown["analysis"]["total_tokens"] == 30
+        assert breakdown["review"]["count"] == 1
+        assert breakdown["tools"]["count"] == 1
+        assert breakdown["project_chat"]["count"] == 1
+        assert breakdown["unknown"]["count"] == 1
+        assert breakdown["unknown"]["total_tokens"] == 14
+        assert breakdown["chat"]["cost_estimate"] == 0.0
+        assert sum(item["count"] for item in breakdown.values()) == 7
+
+    def test_scope_filters_are_applied(self, db, make_user):
+        user = make_user(username="scope", email="scope@example.com")
+        workspace = Workspace(user_id=user.id, name="Scoped")
+        db.session.add(workspace)
+        db.session.commit()
+        project = Project(
+            workspace_id=workspace.id,
+            user_id=user.id,
+            name="Scoped project",
+            source=SOURCE_ARCHIVE,
+            status=STATUS_READY,
+        )
+        db.session.add(project)
+        db.session.commit()
+
+        usage_ledger.record_usage(source="chat", user=user, prompt_tokens=5)
+        usage_ledger.record_usage(source="analysis", user=user, project=project, prompt_tokens=7)
+
+        by_workspace = usage_ledger.breakdown_by_source(user_id=user.id, workspace_id=workspace.id)
+        by_project = usage_ledger.breakdown_by_source(user_id=user.id, project_id=project.id)
+
+        assert sum(item["count"] for item in by_workspace.values()) == 1
+        assert by_workspace["analysis"]["total_tokens"] == 7
+        assert sum(item["count"] for item in by_project.values()) == 1
+        assert by_project["analysis"]["total_tokens"] == 7
+
+
+class TestBreakdownApi:
+    def test_requires_authentication(self, client):
+        response = client.get("/api/usage/breakdown")
+        assert response.status_code == 401
+        assert response.mimetype == "application/problem+json"
+
+    def test_returns_counts_totals_and_currency(self, client, db, make_user, login):
+        user = make_user(username="breakdown", email="breakdown@example.com")
+        login(email="breakdown@example.com")
+        usage_ledger.record_usage(
+            source="chat", user=user, provider="mock", model="mock-1", prompt_tokens=10
+        )
+        usage_ledger.record_usage(
+            source="analysis",
+            user=user,
+            provider="mock",
+            model="mock-1",
+            prompt_tokens=20,
+            completion_tokens=5,
+        )
+        usage_ledger.record_usage(source="mystery", user=user, prompt_tokens=1)
+
+        response = client.get("/api/usage/breakdown")
+
+        assert response.status_code == 200
+        payload = response.get_json()
+        assert payload["currency"]["code"] == "USD"
+        assert payload["cost_is_estimate"] is True
+        assert payload["by_source"]["chat"]["count"] == 1
+        assert payload["by_source"]["analysis"]["total_tokens"] == 25
+        assert payload["by_source"]["unknown"]["count"] == 1
+        assert payload["totals"]["count"] == 3
+        assert payload["totals"]["total_tokens"] == 36
+        assert {item["source"] for item in payload["sources"]} >= {
+            "chat",
+            "analysis",
+            "unknown",
+        }
+
+    def test_other_users_usage_is_not_visible(self, client, db, make_user, login):
+        owner = make_user(username="api-owner", email="api-owner@example.com")
+        usage_ledger.record_usage(source="chat", user=owner, prompt_tokens=100)
+        make_user(username="api-other", email="api-other@example.com")
+        login(email="api-other@example.com")
+
+        payload = client.get("/api/usage/breakdown").get_json()
+
+        assert payload["totals"]["count"] == 0
+        assert all(item["count"] == 0 for item in payload["sources"])
+
+
+class TestProjectInstrumentation:
+    def test_project_chat_records_a_project_chat_row(self, client, db, make_user, login):
+        user, workspace, project = _project(make_user, login)
+
+        response = client.post(
+            f"/workspaces/api/projects/{project.id}/chat",
+            json={"content": "What does app.py do?"},
+        )
+
+        assert response.status_code == 201
+        rows = UsageRecord.query.filter_by(source="project_chat").all()
+        assert len(rows) == 1
+        row = rows[0]
+        assert row.user_id == user.id
+        assert row.workspace_id == workspace.id
+        assert row.project_id == project.id
+        assert row.total_tokens > 0
+        assert row.tokens_estimated is True
+        assert row.provider == "mock"
+        assert row.model == "mock-1"
+
+    def test_project_chat_stream_records_a_row(self, client, db, make_user, login):
+        _, workspace, project = _project(
+            make_user, login, username="streamuser", email="streamuser@example.com"
+        )
+
+        response = client.post(
+            f"/workspaces/api/projects/{project.id}/chat/stream",
+            json={"content": "Explain helper.py"},
+        )
+
+        assert response.status_code == 200
+        assert '"type": "done"' in response.get_data(as_text=True)
+        rows = UsageRecord.query.filter_by(source="project_chat").all()
+        assert len(rows) == 1
+        assert rows[0].workspace_id == workspace.id
+        assert rows[0].project_id == project.id
+        assert rows[0].total_tokens > 0
+
+    def test_each_project_analysis_records_a_row(self, client, db, make_user, login):
+        user, workspace, project = _project(
+            make_user, login, username="analysisuser", email="analysisuser@example.com"
+        )
+
+        for kind in ("bugs", "architecture"):
+            response = client.post(
+                f"/workspaces/api/projects/{project.id}/analyze", json={"kind": kind}
+            )
+            assert response.status_code == 200
+
+        rows = UsageRecord.query.filter_by(source="analysis").order_by(UsageRecord.id).all()
+        assert len(rows) == 2
+        for row in rows:
+            assert row.user_id == user.id
+            assert row.workspace_id == workspace.id
+            assert row.project_id == project.id
+            assert row.total_tokens > 0
+            assert row.tokens_estimated is True
+            assert row.provider == "mock"
+            assert row.model == "mock-1"
