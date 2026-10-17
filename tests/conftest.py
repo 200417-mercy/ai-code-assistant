@@ -132,12 +132,20 @@ def _reset_alert_state():
     same alert in another. The reset is best-effort: modules that do not expose
     a reset hook are simply skipped.
     """
-    from app.services import alerts as alerts_service
+    import importlib
 
-    reset = getattr(alerts_service, "reset", None)
-    if callable(reset):
+    resetters = []
+    for module_name in ("app.services.alerts", "app.services.budget_alerts"):
+        try:
+            module = importlib.import_module(module_name)
+        except ImportError:  # optional module: nothing to reset
+            continue
+        reset = getattr(module, "reset", None)
+        if callable(reset):
+            resetters.append(reset)
+
+    for reset in resetters:
         reset()
     yield
-    if callable(reset):
+    for reset in resetters:
         reset()
-

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import importlib
-import typing
+import inspect
 
 import pytest
 
@@ -14,7 +14,7 @@ def _load_module():
             return importlib.import_module(name)
         except ImportError:
             continue
-    pytest.skip("alert service module not found")
+    pytest.skip("alert service module not found", allow_module_level=True)
 
 
 alerts = _load_module()
@@ -30,11 +30,8 @@ class _Recorder:
 
 def _call_alert(func, kwargs):
     sig = inspect.signature(func)
-    accepted = {k: v for k: v in kwargs.items() if k in sig.parameters}
+    accepted = {k: v for k, v in kwargs.items() if k in sig.parameters}
     return func(**accepted)
-
-
-import inspect
 
 
 def test_threshold_fires_once_per_window():
