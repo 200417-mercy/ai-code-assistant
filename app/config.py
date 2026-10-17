@@ -115,6 +115,12 @@ class Config:
     PLUGIN_TRUST_POLICY = os.getenv("PLUGIN_TRUST_POLICY", "if-present")
     PLUGIN_TRUSTED_KEYS = _trusted_plugin_keys()
 
+    # Operator-controlled catalog used by the remote-install endpoint (#389).
+    # Empty by default so remote installation is disabled until an operator
+    # points it at a vetted catalog file; the endpoint never accepts a
+    # client-supplied manifest or URL. See ``app/services/plugin_catalog.py``.
+    PLUGIN_CATALOG_FILE = os.getenv("PLUGIN_CATALOG_FILE", "")
+
     # Directory scanned by the read-only plugin discovery endpoint (#172).
     # Discovery only reads ``manifest.json`` files from plugin subdirectories
     # and never installs, loads, or mutates anything. Defaults to the repo's
