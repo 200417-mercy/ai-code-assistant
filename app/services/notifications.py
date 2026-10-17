@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 from app.extensions import db
 from app.models.notification import Notification
 
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from app.models.user import User
 
@@ -25,6 +26,7 @@ def _preferences(user_id: int):
     from app.models.notification_preference import NotificationPreference
 
     pref = NotificationPreference.query.filter_by(user_id=user_id).first()
+
     if pref is None:
         pref = NotificationPreference(user_id=user_id)
         db.session.add(pref)
@@ -50,6 +52,7 @@ def notify(
     if user is None:
         return None
     pref = _preferences(user.id)
+
     if not pref.allows(notification_type):
         return None
 
@@ -65,6 +68,7 @@ def notify(
     )
     db.session.add(notification)
     return notification
+
 
 
 def _id_of(obj) -> int | None:
