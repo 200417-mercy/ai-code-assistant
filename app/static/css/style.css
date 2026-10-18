@@ -1906,6 +1906,52 @@ a:hover {
   align-items: flex-start;
 }
 
+/* Trust, signature and compatibility badges (Phase 9 #419). Every badge also
+   renders explicit text and an aria-label, so state is never color-only. */
+.plugin-badges {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-left: 4px;
+  vertical-align: middle;
+}
+
+.plugin-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+.plugin-badge-icon {
+  font-weight: 700;
+}
+
+.plugin-badge-trusted,
+.plugin-badge-compatible {
+  border-color: var(--success);
+  color: var(--success);
+}
+
+.plugin-badge-invalid,
+.plugin-badge-incompatible {
+  border-color: var(--error);
+  color: var(--error);
+}
+
+.plugin-badge-unverified,
+.plugin-badge-unknown {
+  border-color: var(--warning);
+  color: var(--warning);
+}
+
 .plugin-actions {
   display: flex;
   flex-direction: column;

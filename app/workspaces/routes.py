@@ -80,7 +80,7 @@ from app.models.workspace_member import (
     ROLE_VIEWER,
     STATUS_ACTIVE,
 )
-from app.services import project_analysis
+from app.services import project_analysis, usage_ledger
 from app.services.activity import record_activity
 from app.services.events import emit_event
 from app.services.exporting import export_filename, iter_export_zip
@@ -1284,6 +1284,20 @@ def api_project_chat(project_id: int):
     )
     session.updated_at = datetime.now(UTC)
     db.session.add(message)
+    usage = result.get("usage") or {}
+    usage_ledger.record_usage(
+        source=usage_ledger.SOURCE_PROJECT_CHAT,
+        prompt_tokens=usage.get("prompt_tokens", 0),
+        completion_tokens=usage.get("completion_tokens", 0),
+        total_tokens=usage.get("total_tokens"),
+        tokens_estimated=usage.get("tokens_estimated", True),
+        provider=usage.get("provider"),
+        model=usage.get("model"),
+        user=current_user,
+        project=project,
+        workspace_id=project.workspace_id,
+        commit=False,
+    )
     db.session.commit()
     return (
         jsonify(
@@ -1328,6 +1342,7 @@ def api_project_chat_stream(project_id: int):
     session.updated_at = datetime.now(UTC)
     db.session.commit()
     messages = project_analysis.build_messages(project, content, history, attachments=attachments)
+    provider_name, provider_model = usage_ledger.current_provider_metadata(user=current_user)
 
     def generate():
         try:
@@ -1339,17 +1354,32 @@ def api_project_chat_stream(project_id: int):
             return
 
         try:
-            reply = project_analysis.chat_with_project(
+            result = project_analysis.chat_with_project(
                 project, content, attachments, history=history
-            )["analysis"]
+            )
         except LLMProviderError as exc:
             yield f"data: {json.dumps({'type': 'error', 'error': str(exc)})}\n\n"
             return
 
+        reply = result["analysis"]
+        usage = result.get("usage") or {}
         message = ProjectMessage(
             project_id=project.id, session=session, role="assistant", content=reply
         )
         db.session.add(message)
+        usage_ledger.record_usage(
+            source=usage_ledger.SOURCE_PROJECT_CHAT,
+            prompt_tokens=usage.get("prompt_tokens", 0),
+            completion_tokens=usage.get("completion_tokens", 0),
+            total_tokens=usage.get("total_tokens"),
+            tokens_estimated=usage.get("tokens_estimated", True),
+            provider=usage.get("provider") or provider_name,
+            model=usage.get("model") or provider_model,
+            user=current_user,
+            project=project,
+            workspace_id=project.workspace_id,
+            commit=False,
+        )
         db.session.commit()
         yield f"data: {json.dumps({'type': 'done', 'message': message.to_dict()})}\n\n"
 
@@ -1415,6 +1445,21 @@ def api_project_analyze(project_id: int):
     if kind not in project_analysis.ANALYSIS_KINDS:
         return jsonify({"error": "Unsupported analysis kind."}), 400
     result = project_analysis.analyze_project(project, kind)
+    usage = result.get("usage") or {}
+    provider_name, provider_model = usage_ledger.current_provider_metadata(user=current_user)
+    usage_ledger.record_usage(
+        source=usage_ledger.SOURCE_ANALYSIS,
+        prompt_tokens=usage.get("prompt_tokens", 0),
+        completion_tokens=usage.get("completion_tokens", 0),
+        total_tokens=usage.get("total_tokens"),
+        tokens_estimated=usage.get("tokens_estimated", True),
+        provider=usage.get("provider") or provider_name,
+        model=usage.get("model") or provider_model,
+        user=current_user,
+        project=project,
+        workspace_id=project.workspace_id,
+        commit=False,
+    )
     record_activity(
         project.workspace_id,
         EVENT_AI_ANALYSIS_RUN,

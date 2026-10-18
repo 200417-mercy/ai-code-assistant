@@ -98,7 +98,7 @@ class Config:
     LLM_CACHE_TTL = int(os.getenv("LLM_CACHE_TTL", "300"))
     LLM_CACHE_MAX_ENTRIES = int(os.getenv("LLM_CACHE_MAX_ENTRIES", "256"))
     # Pre-flight token/cost estimate (issue #104). The rate is only used to turn
-    # an estimated token count into a rough USD figure shown before sending.
+    # an estimated token count into a rough figure shown before sending.
     LLM_ESTIMATE_USD_PER_1K_TOKENS = float(os.getenv("LLM_ESTIMATE_USD_PER_1K_TOKENS", "0.002"))
     # Provider billing reconciliation (Phase 10). Operators import a provider's
     # reported monthly spend from a bounded CSV and it is compared against the
@@ -106,6 +106,13 @@ class Config:
     # overwritten by an import.
     BILLING_IMPORT_MAX_BYTES = int(os.getenv("BILLING_IMPORT_MAX_BYTES", str(1024 * 1024)))
     BILLING_IMPORT_MAX_ROWS = int(os.getenv("BILLING_IMPORT_MAX_ROWS", "5000"))
+    # Display currency for every cost figure (issue #441). Defaults to USD; the
+    # code is always shown next to the symbol so a figure is never ambiguous.
+    # Operators that change the code are responsible for keeping the configured
+    # price/estimate rates in the same currency.
+    CURRENCY_CODE = os.getenv("CURRENCY_CODE", "USD")
+    CURRENCY_SYMBOL = os.getenv("CURRENCY_SYMBOL", "$")
+    CURRENCY_DECIMAL_PLACES = int(os.getenv("CURRENCY_DECIMAL_PLACES", "4"))
     # Structured chat audit logging (issue #17). ``CHAT_AUDIT_LOG_LEVEL`` may be
     # any logging level or OFF to disable.
     CHAT_AUDIT_LOG_ENABLED = os.getenv("CHAT_AUDIT_LOG_ENABLED", "1") == "1"
@@ -121,12 +128,25 @@ class Config:
     PLUGIN_TRUST_POLICY = os.getenv("PLUGIN_TRUST_POLICY", "if-present")
     PLUGIN_TRUSTED_KEYS = _trusted_plugin_keys()
 
+    # Operator-controlled catalog used by the remote-install endpoint (#389).
+    # Empty by default so remote installation is disabled until an operator
+    # points it at a vetted catalog file; the endpoint never accepts a
+    # client-supplied manifest or URL. See ``app/services/plugin_catalog.py``.
+    PLUGIN_CATALOG_FILE = os.getenv("PLUGIN_CATALOG_FILE", "")
+
     # Directory scanned by the read-only plugin discovery endpoint (#172).
     # Discovery only reads ``manifest.json`` files from plugin subdirectories
     # and never installs, loads, or mutates anything. Defaults to the repo's
     # ``plugins/`` directory; point it at a local directory to advertise
     # discoverable plugins.
     PLUGIN_DISCOVERY_DIR = os.getenv("PLUGIN_DISCOVERY_DIR", str(BASE_DIR / "plugins"))
+
+    # Plugin execution budget (#408). Event handlers and lifecycle hooks run in
+    # a daemon thread and are abandoned once they exceed this many seconds, so
+    # one slow plugin cannot stall a request. The timeout is recorded as a
+    # bounded error report and dispatch continues with the remaining handlers.
+    # Set to 0 (or negative) to disable the bound for local debugging.
+    PLUGIN_EXECUTION_TIMEOUT = float(os.getenv("PLUGIN_EXECUTION_TIMEOUT", "5"))
 
     # Plugin outbound network policy (#193). Every plugin-triggered request must
     # pass ``app.services.plugin_network``: it is https-only, denies

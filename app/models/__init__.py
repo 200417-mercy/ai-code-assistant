@@ -17,7 +17,7 @@ from app.models.message import Message
 from app.models.message_attachment import MessageAttachment
 from app.models.notification import Notification
 from app.models.notification_preference import NotificationPreference
-from app.models.plugin import CapabilityGrant, Plugin, PluginInstallation
+from app.models.plugin import CapabilityGrant, Plugin, PluginInstallation, PluginLockEntry
 from app.models.plugin_error_report import PluginErrorReport
 from app.models.project import Project
 from app.models.project_chat_session import ProjectChatSession
@@ -32,6 +32,7 @@ from app.models.review_comment import ReviewComment
 from app.models.review_config import ReviewConfig
 from app.models.review_finding import ReviewFinding
 from app.models.stellar_security_finding import StellarSecurityFinding
+from app.models.usage_record import UsageRecord
 from app.models.user import User
 from app.models.workspace import Workspace
 from app.models.workspace_member import WorkspaceMember
@@ -54,6 +55,7 @@ __all__ = [
     "Plugin",
     "PluginErrorReport",
     "PluginInstallation",
+    "PluginLockEntry",
     "Project",
     "ProjectChatSession",
     "ProjectComment",
@@ -67,6 +69,7 @@ __all__ = [
     "ReviewConfig",
     "ReviewFinding",
     "StellarSecurityFinding",
+    "UsageRecord",
     "User",
     "Workspace",
     "WorkspaceInvitation",

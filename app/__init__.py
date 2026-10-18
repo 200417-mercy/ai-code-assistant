@@ -32,6 +32,15 @@ def create_app(config_name: str | None = None) -> Flask:
     app = Flask(__name__)
     app.config.from_object(config_by_name[config_name])
 
+    # Reject malformed plugin trust configuration at startup instead of
+    # silently treating every publisher as untrusted (#386).
+    from app.services.plugin_trust import PluginTrustConfigError, validate_trust_config
+
+    try:
+        validate_trust_config(app.config)
+    except PluginTrustConfigError as exc:
+        raise RuntimeError(f"Invalid plugin trust configuration: {exc}") from exc
+
     # Initialize extensions with the application.
     db.init_app(app)
     migrate.init_app(app, db)
@@ -125,5 +134,11 @@ def create_app(config_name: str | None = None) -> Flask:
     from app.services.plugins_cli import register_plugins_cli
 
     register_plugins_cli(app)
+
+    # Usage-ledger maintenance (historical chat backfill and future retention
+    # commands). The backfill is bounded and idempotent.
+    from app.services.usage_cli import register_usage_cli
+
+    register_usage_cli(app)
 
     return app
