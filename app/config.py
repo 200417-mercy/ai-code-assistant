@@ -98,8 +98,15 @@ class Config:
     LLM_CACHE_TTL = int(os.getenv("LLM_CACHE_TTL", "300"))
     LLM_CACHE_MAX_ENTRIES = int(os.getenv("LLM_CACHE_MAX_ENTRIES", "256"))
     # Pre-flight token/cost estimate (issue #104). The rate is only used to turn
-    # an estimated token count into a rough USD figure shown before sending.
+    # an estimated token count into a rough figure shown before sending.
     LLM_ESTIMATE_USD_PER_1K_TOKENS = float(os.getenv("LLM_ESTIMATE_USD_PER_1K_TOKENS", "0.002"))
+    # Display currency for every cost figure (issue #441). Defaults to USD; the
+    # code is always shown next to the symbol so a figure is never ambiguous.
+    # Operators that change the code are responsible for keeping the configured
+    # price/estimate rates in the same currency.
+    CURRENCY_CODE = os.getenv("CURRENCY_CODE", "USD")
+    CURRENCY_SYMBOL = os.getenv("CURRENCY_SYMBOL", "$")
+    CURRENCY_DECIMAL_PLACES = int(os.getenv("CURRENCY_DECIMAL_PLACES", "4"))
     # Structured chat audit logging (issue #17). ``CHAT_AUDIT_LOG_LEVEL`` may be
     # any logging level or OFF to disable.
     CHAT_AUDIT_LOG_ENABLED = os.getenv("CHAT_AUDIT_LOG_ENABLED", "1") == "1"

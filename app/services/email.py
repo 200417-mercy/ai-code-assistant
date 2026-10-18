@@ -1,14 +1,15 @@
 """Transactional email service.
 
 Sends plain-text + simple HTML email over SMTP using environment config. Email
-is a best-effort side channel: when SMTP is not configured, sending degrades to a no-op that never crashes a request. The in-app notification (see
-``app/services/notifications.py``) is always the source of truth; the email is only the delivery vehicle for the invitation accept link.
+is a best-effort side channel: when SMTP is not configured, sending degrades to
+a no-op that never crashes a request. The in-app notification (see
+``app/services/notifications.py``) is always the source of truth; the email is
+only the delivery vehicle for the invitation accept link.
 """
 
 from __future__ import annotations
 
 import logging
-
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText

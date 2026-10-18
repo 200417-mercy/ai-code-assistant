@@ -126,7 +126,65 @@ class TestMigrationHead:
     def test_head_is_latest_revision(self):
         result = _run_flask(["db", "heads"], {"DATABASE_URL": "sqlite:///:memory:"})
         assert result.returncode == 0, result.stderr
-        assert "e7a8b9c0d1e2" in (result.stdout + result.stderr)
+        assert "f9e8d7c6b5a4" in (result.stdout + result.stderr)
+
+    def test_usage_records_table_upgraded(self):
+        expected = {
+            "id",
+            "user_id",
+            "workspace_id",
+            "project_id",
+            "conversation_id",
+            "source",
+            "provider",
+            "model",
+            "prompt_tokens",
+            "completion_tokens",
+            "total_tokens",
+            "tokens_estimated",
+            "cost_estimate",
+            "request_id",
+            "latency_ms",
+            "status",
+            "created_at",
+        }
+        with _migration_db() as db_url, _inspect(db_url) as insp:
+            tables = set(insp.get_table_names())
+            assert "usage_records" in tables
+            columns = {col["name"] for col in insp.get_columns("usage_records")}
+            assert columns == expected
+            indexes = {idx["name"] for idx in insp.get_indexes("usage_records")}
+            assert {
+                "ix_usage_records_user_id",
+                "ix_usage_records_workspace_id",
+                "ix_usage_records_project_id",
+                "ix_usage_records_source",
+                "ix_usage_records_created_at",
+                "ix_usage_records_request_id",
+                "ix_usage_records_status",
+            } <= indexes
+
+    def test_usage_correlation_columns_downgrade_removed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_url = f"sqlite:///{os.path.join(tmp, 'mig_usage_correlation.db')}"
+            up = _run_flask(["db", "upgrade"], {"DATABASE_URL": db_url})
+            assert up.returncode == 0, up.stderr
+            down = _run_flask(["db", "downgrade", "c4d5e6f7a8b9"], {"DATABASE_URL": db_url})
+            assert down.returncode == 0, down.stderr
+            with _inspect(db_url) as insp:
+                columns = {col["name"] for col in insp.get_columns("usage_records")}
+                assert {"request_id", "latency_ms", "status"}.isdisjoint(columns)
+                assert "usage_records" in set(insp.get_table_names())
+
+    def test_usage_records_downgrade_removed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_url = f"sqlite:///{os.path.join(tmp, 'mig_ledger.db')}"
+            up = _run_flask(["db", "upgrade"], {"DATABASE_URL": db_url})
+            assert up.returncode == 0, up.stderr
+            down = _run_flask(["db", "downgrade", "e7a8b9c0d1e2"], {"DATABASE_URL": db_url})
+            assert down.returncode == 0, down.stderr
+            with _inspect(db_url) as insp:
+                assert "usage_records" not in set(insp.get_table_names())
 
     def test_message_token_columns_upgraded(self):
         with _migration_db() as db_url, _inspect(db_url) as insp:

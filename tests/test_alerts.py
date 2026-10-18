@@ -15,7 +15,7 @@ def _load_module():
             return importlib.import_module(name)
         except ImportError:
             continue
-    pytest.skip("alert service module not found")
+    pytest.skip("alert service module not found", allow_module_level=True)
 
 
 alerts = _load_module()
