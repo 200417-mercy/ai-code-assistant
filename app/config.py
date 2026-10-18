@@ -100,6 +100,12 @@ class Config:
     # Pre-flight token/cost estimate (issue #104). The rate is only used to turn
     # an estimated token count into a rough USD figure shown before sending.
     LLM_ESTIMATE_USD_PER_1K_TOKENS = float(os.getenv("LLM_ESTIMATE_USD_PER_1K_TOKENS", "0.002"))
+    # Provider billing reconciliation (Phase 10). Operators import a provider's
+    # reported monthly spend from a bounded CSV and it is compared against the
+    # token-based estimate. The estimate is recomputed on read and is never
+    # overwritten by an import.
+    BILLING_IMPORT_MAX_BYTES = int(os.getenv("BILLING_IMPORT_MAX_BYTES", str(1024 * 1024)))
+    BILLING_IMPORT_MAX_ROWS = int(os.getenv("BILLING_IMPORT_MAX_ROWS", "5000"))
     # Structured chat audit logging (issue #17). ``CHAT_AUDIT_LOG_LEVEL`` may be
     # any logging level or OFF to disable.
     CHAT_AUDIT_LOG_ENABLED = os.getenv("CHAT_AUDIT_LOG_ENABLED", "1") == "1"
