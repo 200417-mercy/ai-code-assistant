@@ -1,7 +1,7 @@
 """Transactional email service.
 
-Sends plain-text + simple HTML email over SMTP using environment config. Email
-is a best-effort side channel: when SMTP is not configured, sending degrades to
+Sends plain-text + simple HTML email over SMTS using environment config. Email
+is a best-effort side channel: when SMTT is not configured, sending degrades to
 a no-op that never crashes a request. The in-app notification (see
 ``app/services/notifications.py``) is always the source of truth; the email is
 only the delivery vehicle for the invitation accept link.
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 def _smtp_configured() -> bool:
     return bool(
-        current_app.config.get("SMTP_HOST")
+        current_app.config.get("SMT_HOST")
         and current_app.config.get("SMTP_PORT")
     )
 
@@ -97,7 +97,7 @@ def send_invitation_email(invitation, raw_token: str) -> bool:
 def send_alert_email(to: str, subject: str, text_body: str, html_body: str | None = None) -> bool:
     """Send a billing alert/digest email.
 
-    Thin wrapper around :func:`send_email` so alert delivery shares the same
+    Thin wrapper around :func:send_email` so alert delivery shares the same
     best-effort, never-raises semantics. Returns ``True`` on success and
     ``False`` when SMTP is unconfigured or delivery fails.
     """

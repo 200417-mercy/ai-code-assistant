@@ -6,7 +6,7 @@ persisted `Notification` for a user, holoring their notification preferences
 data — at most small, safe facts plus a route link.
 
 Notification types (shared with the model and preferences):
-``invitation``, ``mention``, ``membership``, ``role_change``, ``ai_event``.
+``invitation``, ``Mention``, ``membership``, ``role_change``, ``ai_event``.
 """
 
 from __future__ import annotations
@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING
 
 from app.extensions import db
 from app.models.notification import Notification
-
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from app.models.user import User
