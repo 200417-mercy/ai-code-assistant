@@ -1,65 +1,77 @@
 /**
  * Tests for dependency-free dashboard charts (charts.js)
  */
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 
-// Import the charts module
-import { readFileSync } from "fs";
-import { resolve } from "path";
+const MODULE_PATH = resolve(process.cwd(), "app/static/js/charts.js");
 
-const chartsCode = readFileSync(resolve("app/static/js/charts.js"), "utf-8");
+let charts;
 
-// Create a minimal environment to execute the charts code
-function createChartEnvironment() {
-  const ctx = {
-    canvas: { width: 400, height: 300, getBoundingClientRect: () => ({ width: 400, height: 300 }) },
-    clearRect: vi.fn(),
-    beginPath: vi.fn(),
-    moveTo: vi.fn(),
-    lineTo: vi.fn(),
-    stroke: vi.fn(),
-    fill: vi.fn(),
-    arc: vi.fn(),
-    fillRect: vi.fn(),
-    fillText: vi.fn(),
-    strokeRect: vi.fn(),
-    scale: vi.fn(),
-    save: vi.fn(),
-    restore: vi.fn(),
-    translate: vi.fn(),
-    rotate: vi.fn(),
-    closePath: vi.fn(),
-    strokeStyle: "#000",
-    fillStyle: "#000",
-    lineWidth: 1,
-    font: "12px sans-serif",
-    textAlign: "start",
-    textBaseline: "alphabetic",
-    lineCap: "butt",
-    lineJoin: "miter",
-  };
+beforeAll(() => {
+  window.eval(readFileSync(MODULE_PATH, "utf8"));
+  charts = window.AICodeAssistant.charts;
+  if (!charts || !charts.TimeSeriesChart || !charts.BreakdownChart || !charts.SparklineChart) {
+    throw new Error("charts.js did not expose window.AICodeAssistant.charts with expected classes");
+  }
+});
 
-  const canvas = {
-    width: 400,
-    height: 300,
-    getContext: vi.fn(() => ctx),
-    getBoundingClientRect: () => ({ width: 400, height: 300 }),
-  };
-
-  return { ctx, canvas };
+function createCanvas(width = 400, height = 300) {
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  canvas.getBoundingClientRect = () => ({ width, height });
+  return canvas;
 }
 
-describe("TimeSeriesChart", () => {
-  let env;
-
-  beforeEach(() => {
-    env = createChartEnvironment();
+describe("charts module exports", () => {
+  it("exports TimeSeriesChart class", () => {
+    expect(typeof charts.TimeSeriesChart).toBe("function");
   });
 
-  it("should render without throwing when data is provided", () => {
-    // Execute the charts code in a context with canvas
-    const { TimeSeriesChart } = eval(chartsCode + "; ({ TimeSeriesChart })");
+  it("exports BreakdownChart class", () => {
+    expect(typeof charts.BreakdownChart).toBe("function");
+  });
+
+  it("exports SparklineChart class", () => {
+    expect(typeof charts.SparklineChart).toBe("function");
+  });
+
+  it("exports formatNumber function", () => {
+    expect(typeof charts.formatNumber).toBe("function");
+  });
+
+  it("exports formatTime function", () => {
+    expect(typeof charts.formatTime).toBe("function");
+  });
+});
+
+describe("formatNumber", () => {
+  it("formats numbers correctly", () => {
+    expect(charts.formatNumber(0)).toBe("0");
+    expect(charts.formatNumber(999)).toBe("999");
+    expect(charts.formatNumber(1000)).toBe("1K");
+    expect(charts.formatNumber(1500)).toBe("1.5K");
+    expect(charts.formatNumber(1000000)).toBe("1M");
+    expect(charts.formatNumber(1500000)).toBe("1.5M");
+    expect(charts.formatNumber(1000000000)).toBe("1B");
+  });
+});
+
+describe("formatTime", () => {
+  it("formats timestamps", () => {
+    const timestamp = new Date("2024-01-15T10:30:00Z").getTime();
+    const formatted = charts.formatTime(timestamp);
+    expect(formatted).toContain("Jan");
+    expect(formatted).toContain("15");
+  });
+});
+
+describe("TimeSeriesChart", () => {
+  it("renders without throwing when data is provided", () => {
+    const canvas = createCanvas();
     const data = [
       {
         id: "series1",
@@ -71,37 +83,37 @@ describe("TimeSeriesChart", () => {
         ],
       },
     ];
-    const chart = new TimeSeriesChart(env.canvas, { data });
+    const chart = new charts.TimeSeriesChart(canvas, { data });
     expect(chart).toBeDefined();
   });
 
-  it("should handle empty data gracefully", () => {
-    const { TimeSeriesChart } = eval(chartsCode + "; ({ TimeSeriesChart })");
-    const chart = new TimeSeriesChart(env.canvas, { data: [] });
+  it("handles empty data gracefully", () => {
+    const canvas = createCanvas();
+    const chart = new charts.TimeSeriesChart(canvas, { data: [] });
     expect(chart).toBeDefined();
   });
 
-  it("should handle single data point", () => {
-    const { TimeSeriesChart } = eval(chartsCode + "; ({ TimeSeriesChart })");
+  it("handles single data point", () => {
+    const canvas = createCanvas();
     const data = [
       {
         id: "series1",
         values: [{ timestamp: Date.now(), value: 100 }],
       },
     ];
-    const chart = new TimeSeriesChart(env.canvas, { data });
+    const chart = new charts.TimeSeriesChart(canvas, { data });
     expect(chart).toBeDefined();
   });
 
-  it("should update data via setData", () => {
-    const { TimeSeriesChart } = eval(chartsCode + "; ({ TimeSeriesChart })");
+  it("updates data via setData", () => {
+    const canvas = createCanvas();
     const data = [
       {
         id: "series1",
         values: [{ timestamp: Date.now(), value: 100 }],
       },
     ];
-    const chart = new TimeSeriesChart(env.canvas, { data });
+    const chart = new charts.TimeSeriesChart(canvas, { data });
     const newData = [
       {
         id: "series1",
@@ -117,33 +129,27 @@ describe("TimeSeriesChart", () => {
 });
 
 describe("BreakdownChart", () => {
-  let env;
-
-  beforeEach(() => {
-    env = createChartEnvironment();
-  });
-
-  it("should render without throwing when data is provided", () => {
-    const { BreakdownChart } = eval(chartsCode + "; ({ BreakdownChart })");
+  it("renders without throwing when data is provided", () => {
+    const canvas = createCanvas();
     const data = [
       { source: "chat", value: 1000, label: "Chat" },
       { source: "analysis", value: 500, label: "Analysis" },
       { source: "tools", value: 250, label: "Tools" },
     ];
-    const chart = new BreakdownChart(env.canvas, { data });
+    const chart = new charts.BreakdownChart(canvas, { data });
     expect(chart).toBeDefined();
   });
 
-  it("should handle empty data gracefully", () => {
-    const { BreakdownChart } = eval(chartsCode + "; ({ BreakdownChart })");
-    const chart = new BreakdownChart(env.canvas, { data: [] });
+  it("handles empty data gracefully", () => {
+    const canvas = createCanvas();
+    const chart = new charts.BreakdownChart(canvas, { data: [] });
     expect(chart).toBeDefined();
   });
 
-  it("should update data via setData", () => {
-    const { BreakdownChart } = eval(chartsCode + "; ({ BreakdownChart })");
+  it("updates data via setData", () => {
+    const canvas = createCanvas();
     const data = [{ source: "chat", value: 100, label: "Chat" }];
-    const chart = new BreakdownChart(env.canvas, { data });
+    const chart = new charts.BreakdownChart(canvas, { data });
     const newData = [
       { source: "chat", value: 100, label: "Chat" },
       { source: "analysis", value: 50, label: "Analysis" },
@@ -152,68 +158,39 @@ describe("BreakdownChart", () => {
     expect(chart.data).toEqual(newData);
   });
 
-  it("should set total via setTotal", () => {
-    const { BreakdownChart } = eval(chartsCode + "; ({ BreakdownChart })");
+  it("sets total via setTotal", () => {
+    const canvas = createCanvas();
     const data = [{ source: "chat", value: 100, label: "Chat" }];
-    const chart = new BreakdownChart(env.canvas, { data });
+    const chart = new charts.BreakdownChart(canvas, { data });
     chart.setTotal(1000);
     expect(chart.total).toBe(1000);
   });
 });
 
 describe("SparklineChart", () => {
-  let env;
-
-  beforeEach(() => {
-    env = createChartEnvironment();
-  });
-
-  it("should render without throwing when data is provided", () => {
-    const { SparklineChart } = eval(chartsCode + "; ({ SparklineChart })");
+  it("renders without throwing when data is provided", () => {
+    const canvas = createCanvas(200, 40);
     const data = [10, 20, 15, 25, 30, 28, 35];
-    const chart = new SparklineChart(env.canvas, { data });
+    const chart = new charts.SparklineChart(canvas, { data });
     expect(chart).toBeDefined();
   });
 
-  it("should handle empty data gracefully", () => {
-    const { SparklineChart } = eval(chartsCode + "; ({ SparklineChart })");
-    const chart = new SparklineChart(env.canvas, { data: [] });
+  it("handles empty data gracefully", () => {
+    const canvas = createCanvas(200, 40);
+    const chart = new charts.SparklineChart(canvas, { data: [] });
     expect(chart).toBeDefined();
   });
 
-  it("should handle single data point", () => {
-    const { SparklineChart } = eval(chartsCode + "; ({ SparklineChart })");
-    const chart = new SparklineChart(env.canvas, { data: [100] });
+  it("handles single data point", () => {
+    const canvas = createCanvas(200, 40);
+    const chart = new charts.SparklineChart(canvas, { data: [100] });
     expect(chart).toBeDefined();
   });
 
-  it("should update data via setData", () => {
-    const { SparklineChart } = eval(chartsCode + "; ({ SparklineChart })");
-    const chart = new SparklineChart(env.canvas, { data: [10, 20] });
+  it("updates data via setData", () => {
+    const canvas = createCanvas(200, 40);
+    const chart = new charts.SparklineChart(canvas, { data: [10, 20] });
     chart.setData([10, 20, 30, 40]);
     expect(chart.data).toEqual([10, 20, 30, 40]);
-  });
-});
-
-describe("formatNumber", () => {
-  it("should format numbers correctly", () => {
-    const { formatNumber } = eval(chartsCode + "; ({ formatNumber })");
-    expect(formatNumber(0)).toBe("0");
-    expect(formatNumber(999)).toBe("999");
-    expect(formatNumber(1000)).toBe("1K");
-    expect(formatNumber(1500)).toBe("1.5K");
-    expect(formatNumber(1000000)).toBe("1M");
-    expect(formatNumber(1500000)).toBe("1.5M");
-    expect(formatNumber(1000000000)).toBe("1B");
-  });
-});
-
-describe("formatTime", () => {
-  it("should format timestamps", () => {
-    const { formatTime } = eval(chartsCode + "; ({ formatTime })");
-    const timestamp = new Date("2024-01-15T10:30:00Z").getTime();
-    const formatted = formatTime(timestamp);
-    expect(formatted).toContain("Jan");
-    expect(formatted).toContain("15");
   });
 });
