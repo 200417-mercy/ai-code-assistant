@@ -23,9 +23,12 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import io
+import json
 import logging
 import os
 import re
+import zipfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO
@@ -39,6 +42,25 @@ logger = logging.getLogger(__name__)
 
 #: Read size used when hashing a file or stream.
 CHUNK_SIZE = 1024 * 1024
+
+#: Root file names required by the plugin artifact format (#382).
+ARTIFACT_MANIFEST = "manifest.json"
+ARTIFACT_SIGNATURE = "signature.json"
+
+#: Text members are stored with ``\n`` line endings so an artifact built on
+#: Windows (CRLF checkout) is byte-identical to one built on Linux.
+_TEXT_SUFFIXES = frozenset(
+    {".json", ".py", ".md", ".txt", ".toml", ".cfg", ".ini", ".yaml", ".yml"}
+)
+
+
+def _artifact_member_bytes(path: Path) -> bytes:
+    """Read a source file, normalizing line endings for text members."""
+    data = path.read_bytes()
+    if path.suffix.lower() in _TEXT_SUFFIXES:
+        data = data.replace(b"\r\n", b"\n")
+    return data
+
 
 #: Accepted sha256 spellings: ``sha256:<hex>``, ``sha256-<hex>``, and bare hex.
 _SHA256_RE = re.compile(r"^(?:sha256[:=-])?([0-9a-fA-F]{64})$", re.IGNORECASE)
@@ -231,6 +253,157 @@ def verify_and_register_artifact[T](
     return register(digest)
 
 
+def _artifact_names(archive: zipfile.ZipFile) -> list[str]:
+    """Return validated member names, refusing duplicates and unsafe paths."""
+    names = archive.namelist()
+    if len(names) != len(set(names)):
+        raise ArtifactError("Artifact contains duplicate entries")
+    for name in names:
+        parts = name.split("/")
+        if (
+            not name
+            or name.startswith("/")
+            or "\\" in name
+            or ".." in parts
+            or (parts and parts[0] in ("", "."))
+        ):
+            raise ArtifactError(f"Unsafe artifact path: {name!r}")
+    return names
+
+
+def validate_artifact_package(
+    source: ArtifactSource,
+) -> dict[str, Any]:
+    """Validate a plugin artifact ``.zip`` against the published format (#382).
+
+    Contract (see ``docs/plugin-artifact-format.md``):
+
+    * ``manifest.json`` and a detached ``signature.json`` sit at the archive
+      root (never nested in a wrapper directory);
+    * ``signature.json`` is Ed25519 metadata (``publisher``/``algorithm``/``value``);
+    * the manifest validates against ``plugins/plugin.schema.json``;
+    * the module named by ``entry_point`` ships inside the archive;
+    * member paths are relative, unique and traversal-free.
+
+    The detached signature's **shape** is checked here; cryptographic
+    verification against a trusted publisher key happens at install time
+    (``enforce_publisher_trust``), so a format-valid example needs no key.
+
+    Args:
+        source: A ``.zip`` path, in-memory bytes, or a binary stream.
+
+    Returns:
+        A dict with ``id``, ``version``, ``entry_point``, ``publisher``,
+        ``files`` (sorted names) and ``sha256`` of the archive.
+
+    Raises:
+        ArtifactError: If the archive is unreadable or violates the format.
+    """
+    from app.services.plugin_signatures import validate_signature_metadata
+    from app.services.plugins import PluginManifest
+
+    if isinstance(source, (bytes, bytearray, memoryview)):
+        payload = bytes(source)
+        archive_source: Any = io.BytesIO(payload)
+    elif hasattr(source, "read"):
+        payload = source.read()
+        archive_source = io.BytesIO(payload)
+    else:
+        path = Path(source)
+        archived = path.read_bytes()
+        payload = archived
+        archive_source = io.BytesIO(archived)
+
+    try:
+        archive = zipfile.ZipFile(archive_source)
+    except (zipfile.BadZipFile, OSError) as exc:
+        raise ArtifactError(f"Artifact is not a readable zip: {exc}") from exc
+
+    with archive:
+        names = _artifact_names(archive)
+        if ARTIFACT_MANIFEST not in names:
+            raise ArtifactError("Artifact is missing manifest.json at the archive root")
+        if ARTIFACT_SIGNATURE not in names:
+            raise ArtifactError("Artifact is missing signature.json at the archive root")
+
+        try:
+            manifest = json.loads(archive.read(ARTIFACT_MANIFEST).decode("utf-8"))
+            signature = json.loads(archive.read(ARTIFACT_SIGNATURE).decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise ArtifactError(f"Artifact JSON is invalid: {exc}") from exc
+
+        if not isinstance(manifest, dict):
+            raise ArtifactError("Artifact manifest.json must be a JSON object")
+        if not isinstance(signature, dict):
+            raise ArtifactError("Artifact signature.json must be a JSON object")
+
+        signature_error = validate_signature_metadata(signature)
+        if signature_error:
+            raise ArtifactError(f"Artifact signature.json is invalid: {signature_error}")
+
+        # Validate the manifest schema with any embedded signature removed: the
+        # detached signature is what this format carries, and its cryptographic
+        # check happens at install time.
+        body = {key: value for key, value in manifest.items() if key != "signature"}
+        try:
+            validated = PluginManifest.from_dict(body)
+        except Exception as exc:  # ManifestValidationError/PluginError
+            raise ArtifactError(f"Artifact manifest is invalid: {exc}") from exc
+
+        module = validated.entry_point.split(":", 1)[0]
+        module_path = module.replace(".", "/") + ".py"
+        if module_path not in names:
+            raise ArtifactError(f"Artifact is missing entry point module: {module_path}")
+
+    return {
+        "id": validated.id,
+        "version": validated.version,
+        "entry_point": validated.entry_point,
+        "publisher": signature.get("publisher"),
+        "files": sorted(names),
+        "sha256": compute_sha256(payload),
+    }
+
+
+def build_artifact_package(
+    directory: str | os.PathLike[str],
+    destination: str | os.PathLike[str],
+) -> Path:
+    """Build a deterministic plugin artifact ``.zip`` from ``directory``.
+
+    Members are sorted and written with a fixed timestamp and mode so the same
+    source tree always produces byte-identical archives (safe for the sha256 in
+    a catalog). ``manifest.json`` and ``signature.json`` must be at the root of
+    ``directory``.
+    """
+    root = Path(directory)
+    if not root.is_dir():
+        raise ArtifactError(f"Artifact source is not a directory: {root}")
+
+    files = sorted(path for path in root.rglob("*") if path.is_file())
+    target = Path(destination)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    resolved_target = target.resolve()
+    # Previously built artifacts at the source root are never repackaged.
+    existing_archives = {
+        path.resolve()
+        for path in root.iterdir()
+        if path.is_file() and path.suffix.lower() == ".zip"
+    }
+
+    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
+        for path in files:
+            resolved = path.resolve()
+            if resolved == resolved_target or resolved in existing_archives:
+                continue
+            arcname = path.relative_to(root).as_posix()
+            info = zipfile.ZipInfo(arcname, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = 0o644 << 16
+            archive.writestr(info, _artifact_member_bytes(path))
+    return target
+
+
 def download_artifact(
     source: str,
     *,
@@ -306,13 +479,17 @@ def download_artifact(
 
 
 __all__ = [
+    "ARTIFACT_MANIFEST",
+    "ARTIFACT_SIGNATURE",
     "CHUNK_SIZE",
     "ArtifactError",
     "ArtifactIntegrityError",
     "ArtifactSource",
+    "build_artifact_package",
     "compute_sha256",
     "download_artifact",
     "normalize_sha256",
+    "validate_artifact_package",
     "verify_and_register_artifact",
     "verify_artifact_integrity",
 ]

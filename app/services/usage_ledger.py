@@ -246,6 +246,7 @@ def record_usage(
             raise ValueError("cost_estimate must be numeric.") from exc
         if cost_estimate < 0:
             raise ValueError("cost_estimate must be non-negative.")
+        cost_estimate = pricing.round_cost(cost_estimate)
 
     record = UsageRecord(
         user_id=resolved_user_id,
@@ -292,7 +293,7 @@ def summarize_records(records) -> dict:
         if cost is not None:
             summary["cost_estimate"] += float(cost)
             summary["priced_records"] += 1
-    summary["cost_estimate"] = round(summary["cost_estimate"], 6)
+    summary["cost_estimate"] = pricing.round_cost(summary["cost_estimate"])
     return summary
 
 
