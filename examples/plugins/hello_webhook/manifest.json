@@ -1,0 +1,13 @@
+{
+  "id": "hello-webhook",
+  "name": "Hello Webhook",
+  "version": "0.1.0",
+  "description": "Example plugin demonstrating subscribing to webhook events and exercising a capability.",
+  "author": "AI Code Assistant contributors",
+  "entry_point": "hello_webhook.plugin:HelloWebhookPlugin",
+  "capabilities": ["PROJECT_READ", "NOTIFICATION_CREATE"],
+  "permissions": ["read:project:files", "create:notification"],
+  "configuration": {
+    "webhook_url": "https://example.com/webhook"
+  }
+}
