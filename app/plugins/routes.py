@@ -75,6 +75,11 @@ from app.services.plugin_updates import notify_available_updates, update_plan
 from app.services.plugin_versions import is_newer
 from app.services.plugins import ManifestValidationError, PluginError, PluginManifest
 
+#: Hard maximum number of plugins returned in a single marketplace page (#379).
+MAX_PAGE_LIMIT = 100
+#: Default page size for the marketplace listing.
+DEFAULT_PAGE_LIMIT = 50
+
 
 class PluginAlreadyInstalledError(ValueError):
     """Raised when a plugin is already installed in the workspace."""
@@ -362,12 +367,41 @@ def api_list_workspaces():
 @bp.route("/api/workspaces/<int:workspace_id>/plugins", methods=["GET"])
 @login_required
 def api_list_plugins(workspace_id: int):
+    """List registered plugins with stable, bounded pagination (#379).
+
+    Query params: ``page`` (1-based) and ``limit``. ``limit`` is clamped to
+    :data:`MAX_PAGE_LIMIT`, so an oversized request never returns an unbounded
+    page. Ordering is by plugin id, making pages stable across requests.
+    """
     resolve_workspace(workspace_id)
-    plugins = Plugin.query.order_by(Plugin.id).all()
+
+    page = request.args.get("page", type=int)
+    if page is None or page < 1:
+        page = 1
+    limit = request.args.get("limit", type=int)
+    if limit is None:
+        limit = DEFAULT_PAGE_LIMIT
+    limit = max(1, min(limit, MAX_PAGE_LIMIT))
+
+    total = Plugin.query.count()
+    pages = (total + limit - 1) // limit if total else 0
+    offset = (page - 1) * limit
+    rows = Plugin.query.order_by(Plugin.id).offset(offset).limit(limit).all()
+
     return jsonify(
         {
             "workspace": {"id": workspace_id},
-            "plugins": [_serialize(p, workspace_id) for p in plugins],
+            "plugins": [_serialize(p, workspace_id) for p in rows],
+            "pagination": {
+                "page": page,
+                "limit": limit,
+                "max_limit": MAX_PAGE_LIMIT,
+                "total": total,
+                "pages": pages,
+                "has_next": page < pages,
+                "has_prev": page > 1,
+            },
+            "ordering": ["id"],
         }
     )
 

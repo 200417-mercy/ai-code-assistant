@@ -231,12 +231,87 @@ def verify_and_register_artifact[T](
     return register(digest)
 
 
+def download_artifact(
+    source: str,
+    *,
+    policy: Any | None = None,
+    session: Any | None = None,
+    resolver: Any | None = None,
+    timeout: int | None = None,
+    max_bytes: int | None = None,
+    destination: str | os.PathLike[str] | None = None,
+) -> dict:
+    """Download a catalog artifact through the bounded plugin transport (#383).
+
+    ``source`` must be the URL from the operator-controlled catalog entry. This
+    function is never fed a URL from a request body or an imported project, so a
+    client cannot redirect an install at an arbitrary host.
+
+    Every transport guard runs before bytes are kept: https-only, allowlist,
+    SSRF/private-address rejection, bounded timeout, redirect refusal and the
+    response size cap. The size cap is enforced twice (transport and here) so a
+    caller-supplied policy cannot be bypassed.
+
+    Returns a dict with ``sha256``, ``size`` and ``source`` plus either the
+    downloaded ``content`` bytes or the on-disk ``path`` when ``destination`` is
+    supplied.
+
+    Raises:
+        PluginNetworkError: When any transport guard refuses the request.
+        ArtifactError: When the downloaded body still exceeds the size cap.
+    """
+    from app.services.plugin_network import DEFAULT_MAX_BYTES, guarded_request
+
+    response = guarded_request(
+        "GET",
+        source,
+        policy=policy,
+        session=session,
+        resolver=resolver,
+        timeout=timeout,
+        max_bytes=max_bytes,
+    )
+
+    body = getattr(response, "content", None) or b""
+    if not isinstance(body, (bytes, bytearray, memoryview)):
+        raise ArtifactError("Artifact response body must be bytes")
+
+    if max_bytes is not None:
+        limit = max_bytes
+    elif policy is not None:
+        limit = int(getattr(policy, "max_bytes", DEFAULT_MAX_BYTES))
+    else:
+        limit = DEFAULT_MAX_BYTES
+    if len(body) > limit:
+        raise ArtifactError(f"Artifact exceeds the {limit} byte cap")
+
+    data = bytes(body)
+    result: dict[str, Any] = {
+        "sha256": compute_sha256(data),
+        "size": len(data),
+        "source": source,
+    }
+
+    if destination is not None:
+        path = Path(destination)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.tmp")
+        temporary.write_bytes(data)
+        os.replace(temporary, path)
+        result["path"] = str(path)
+    else:
+        result["content"] = data
+
+    return result
+
+
 __all__ = [
     "CHUNK_SIZE",
     "ArtifactError",
     "ArtifactIntegrityError",
     "ArtifactSource",
     "compute_sha256",
+    "download_artifact",
     "normalize_sha256",
     "verify_and_register_artifact",
     "verify_artifact_integrity",

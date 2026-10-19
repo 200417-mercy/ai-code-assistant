@@ -261,6 +261,20 @@ def send_message(conversation_id: int):
         assistant_message.completion_tokens = usage.completion_tokens or 0
         assistant_message.total_tokens = usage.total_tokens or 0
     conversation.messages.append(assistant_message)
+    provider_name, provider_model = usage_ledger.current_provider_metadata(user=current_user)
+    usage_ledger.record_usage(
+        source=usage_ledger.SOURCE_CHAT,
+        prompt_tokens=assistant_message.prompt_tokens or 0,
+        completion_tokens=assistant_message.completion_tokens or 0,
+        total_tokens=assistant_message.total_tokens,
+        tokens_estimated=not (usage is not None and usage.has_usage),
+        user=current_user,
+        conversation=conversation,
+        provider=provider_name,
+        model=provider_model,
+        status=usage_ledger.STATUS_SUCCESS,
+        commit=False,
+    )
     if conversation.title == "New conversation":
         conversation.title = content.strip()[:60] or "New conversation"
     db.session.commit()
