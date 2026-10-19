@@ -126,6 +126,7 @@ class TestMigrationHead:
     def test_head_is_latest_revision(self):
         result = _run_flask(["db", "heads"], {"DATABASE_URL": "sqlite:///:memory:"})
         assert result.returncode == 0, result.stderr
+        assert "a9f8e7d6c5b4" in (result.stdout + result.stderr)
         assert "f9e8d7c6b5a4" in (result.stdout + result.stderr)
 
     def test_usage_records_table_upgraded(self):
@@ -592,3 +593,31 @@ class TestMigrationHead:
             with _inspect(db_url) as insp:
                 columns = {col["name"] for col in insp.get_columns("workspaces")}
                 assert "slug" not in columns
+
+    def test_provider_billing_records_table_upgraded(self):
+        expected = {
+            "id",
+            "user_id",
+            "provider",
+            "period",
+            "amount_usd",
+            "currency",
+            "source_filename",
+            "created_at",
+            "updated_at",
+        }
+        with _migration_db() as db_url, _inspect(db_url) as insp:
+            tables = set(insp.get_table_names())
+            assert "provider_billing_records" in tables
+            columns = {col["name"] for col in insp.get_columns("provider_billing_records")}
+            assert columns == expected
+
+    def test_provider_billing_records_downgrade_removed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_url = f"sqlite:///{os.path.join(tmp, 'mig_billing.db')}"
+            up = _run_flask(["db", "upgrade"], {"DATABASE_URL": db_url})
+            assert up.returncode == 0, up.stderr
+            down = _run_flask(["db", "downgrade", "e7a8b9c0d1e2"], {"DATABASE_URL": db_url})
+            assert down.returncode == 0, down.stderr
+            with _inspect(db_url) as insp:
+                assert "provider_billing_records" not in set(insp.get_table_names())
