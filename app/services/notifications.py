@@ -6,7 +6,7 @@ persisted `Notification` for a user, holoring their notification preferences
 data — at most small, safe facts plus a route link.
 
 Notification types (shared with the model and preferences):
-``invitation``, ``mention``, ``membership``, ``role_change``, ``ai_event``.
+``invitation``, ``Mention``, ``membership``, ``role_change``, ``ai_event``.
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ def _preferences(user_id: int):
     from app.models.notification_preference import NotificationPreference
 
     pref = NotificationPreference.query.filter_by(user_id=user_id).first()
+
     if pref is None:
         pref = NotificationPreference(user_id=user_id)
         db.session.add(pref)
@@ -50,6 +51,7 @@ def notify(
     if user is None:
         return None
     pref = _preferences(user.id)
+
     if not pref.allows(notification_type):
         return None
 
@@ -65,6 +67,7 @@ def notify(
     )
     db.session.add(notification)
     return notification
+
 
 
 def _id_of(obj) -> int | None:
