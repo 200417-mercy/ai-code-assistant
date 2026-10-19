@@ -24,7 +24,15 @@ from flask import current_app
 
 from app.extensions import db
 from app.models import Plugin
+from app.services.plugin_catalog import (
+    CatalogEntry,
+    load_plugin_catalog,
+)
 from app.services.plugin_compat import enforce_compatible
+from app.services.plugin_signatures import (
+    VERIFY_IF_PRESENT,
+    enforce_publisher_trust,
+)
 from app.services.plugins import (
     ManifestValidationError,
     PluginError,
@@ -52,6 +60,10 @@ class PluginEntryPointMismatchError(PluginUpdateError):
 
 class PluginDependencyResolutionError(ValueError):
     """Raised when a plugin cannot be enabled because dependencies are unsatisfied."""
+
+
+class RemoteInstallError(PluginError):
+    """Raised when a catalog install is refused before registration."""
 
 
 def list_plugins() -> list[Plugin]:
@@ -203,6 +215,106 @@ def install_from_local_dir(path: str) -> Plugin:
     return plugin
 
 
+def install_from_catalog(
+    plugin_id: str,
+    version: str | None = None,
+    *,
+    config=None,
+) -> tuple[Plugin, CatalogEntry]:
+    """Register a plugin resolved from the operator-controlled catalog (#387/#390).
+
+    The active ``PLUGIN_TRUST_POLICY`` is enforced **before** anything is
+    written: ``required`` refuses unsigned entries, while ``if-present`` accepts
+    an unsigned entry as ``Unverified`` but still refuses forged or untrusted
+    signatures. The declared compatibility range is enforced next, and only then
+    is the global ``Plugin`` row created/reused.
+
+    This is the shared remote-install path used by the CLI (and mirrors the API
+    route), so the policy cannot drift between surfaces. No artifact is
+    downloaded, no code is executed and no capability is granted.
+
+    Args:
+        plugin_id: Catalog plugin id.
+        version: Optional exact version; newest when omitted.
+        config: Config mapping to read from (defaults to the app config).
+
+    Returns:
+        ``(plugin, catalog_entry)`` for the registered plugin.
+
+    Raises:
+        CatalogUnavailableError/CatalogError/CatalogEntryNotFoundError: Catalog
+            problems (propagated from the catalog loader).
+        PublisherSignatureError: The active policy refused the signature.
+        PluginTrustConfigError: The trust policy or key configuration is invalid.
+        IncompatibleCompatibilityError/InvalidCompatibilityError: The plugin's
+            compatibility range excludes the running app or is malformed.
+        RemoteInstallError: The manifest conflicts with an existing registration.
+    """
+    source = config if config is not None else current_app.config
+    catalog = load_plugin_catalog(source)
+    entry = catalog.get(plugin_id, version)
+
+    trusted_publishers = source.get("PLUGIN_TRUSTED_KEYS") or {}
+    # Schema validation is trust-policy agnostic; the policy is enforced below
+    # via enforce_publisher_trust so a detached catalog signature is checked.
+    manifest = PluginManifest.from_dict(
+        entry.manifest,
+        trusted_publishers=trusted_publishers,
+        trust_policy=VERIFY_IF_PRESENT,
+    )
+
+    policy = source.get("PLUGIN_TRUST_POLICY", VERIFY_IF_PRESENT)
+    signature = entry.signature if entry.signature is not None else entry.manifest.get("signature")
+    trust = enforce_publisher_trust(
+        entry.manifest,
+        signature,
+        trusted_publishers=trusted_publishers,
+        policy=policy,
+    )
+
+    enforce_compatible(manifest.compatibility, subject=f"Plugin {manifest.id}")
+
+    # Persist only after every guard has passed.
+    manifest.trust_state = trust.state
+    manifest.trust_publisher = trust.publisher
+    plugin = _register_manifest(manifest)
+    return plugin, entry
+
+
+def _register_manifest(manifest: PluginManifest) -> Plugin:
+    """Create or reuse the global ``Plugin`` row for a validated manifest."""
+    existing = db.session.get(Plugin, manifest.id)
+    if existing is not None:
+        if existing.entry_point != manifest.entry_point:
+            raise RemoteInstallError(
+                f"Manifest entry_point does not match the registered plugin {manifest.id}."
+            )
+        existing.version = manifest.version
+        existing.trust_state = manifest.trust_state
+        existing.trust_publisher = manifest.trust_publisher
+        db.session.commit()
+        return existing
+
+    plugin = Plugin(
+        id=manifest.id,
+        name=manifest.name,
+        version=manifest.version,
+        description=manifest.description,
+        author=manifest.author,
+        entry_point=manifest.entry_point,
+        capabilities=manifest.capabilities,
+        permissions=manifest.permissions or [],
+        dependencies=manifest.dependencies or [],
+        compatibility=manifest.compatibility,
+        configuration=manifest.configuration or {},
+        trust_state=manifest.trust_state,
+        trust_publisher=manifest.trust_publisher,
+    )
+    db.session.add(plugin)
+    db.session.commit()
+    return plugin
+
+
 def update_plugin(plugin_id: str, manifest: PluginManifest) -> Plugin:
     """Apply a validated manifest to an already-registered plugin.
 
@@ -260,8 +372,10 @@ __all__ = [
     "PluginManifest",
     "PluginNotFoundError",
     "PluginUpdateError",
+    "RemoteInstallError",
     "discover_plugins",
     "get_plugin",
+    "install_from_catalog",
     "install_from_local_dir",
     "list_plugins",
     "resolve_plugin_dependencies",

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import asdict, dataclass
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from flask import has_app_context
@@ -41,6 +42,31 @@ ESTIMATE_DISCLAIMER = (
     "Default prices are estimates in USD per 1,000 tokens. "
     "Verify them against your provider's current pricing before relying on them."
 )
+
+#: Canonical number of decimal places for every stored/aggregated USD cost (#444).
+COST_PRECISION = 6
+
+#: Quantum used by :func:`round_cost` (``0.000001`` USD).
+_COST_QUANTUM = Decimal(1).scaleb(-COST_PRECISION)
+
+
+def round_cost(value: float | int | Decimal | str | None) -> float | None:
+    """Round a USD cost to :data:`COST_PRECISION` using half-up rounding.
+
+    This is the one rounding rule the codebase uses for cost values. Rounding
+    the decimal *representation* of the value (rather than the binary float)
+    with ``ROUND_HALF_UP`` makes results deterministic and avoids the
+    banker's-rounding surprises of the built-in :func:`round` at exact
+    half-way boundaries. ``None`` is preserved so an unknown price stays
+    unknown rather than becoming zero.
+    """
+    if value is None:
+        return None
+    try:
+        decimal_value = Decimal(str(value))
+    except (ArithmeticError, ValueError) as exc:
+        raise ValueError("Cost must be numeric.") from exc
+    return float(decimal_value.quantize(_COST_QUANTUM, rounding=ROUND_HALF_UP))
 
 
 @dataclass(frozen=True)
@@ -307,7 +333,8 @@ def estimate_cost_usd(
     )
     if price is None:
         return None
-    return prompt / 1000 * price.input_per_1k_usd + completion / 1000 * price.output_per_1k_usd
+    estimate = prompt / 1000 * price.input_per_1k_usd + completion / 1000 * price.output_per_1k_usd
+    return round_cost(estimate)
 
 
 def estimate_workspace_cost_usd(

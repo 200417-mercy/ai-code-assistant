@@ -7,6 +7,7 @@ Usage (inside the Flask app context):
     flask plugins enable <plugin_id>
     flask plugins disable <plugin_id>
     flask plugins install <local-path> [--json]
+    flask plugins install <plugin-id> --remote [--version V] [--json]
     flask plugins scaffold <plugin-id> [--output-dir <path>] [--json]
     flask plugins lockfile <workspace-id> [--json]
     flask plugins publishers [--json]
@@ -14,9 +15,11 @@ Usage (inside the Flask app context):
 
 The CLI acts as the **operator**, not as an end user: it reads/writes the
 persisted ``Plugin`` rows and never performs per-user workspace authorization.
-Installation is **local-only** — a filesystem path with a validated
-``manifest.json``; URLs are refused. Nothing here grants capabilities or loads
-plugin code.
+Local installation is a filesystem path with a validated ``manifest.json``;
+URLs are refused. With ``--remote`` the positional argument is a plugin id from
+the operator-controlled catalog and the active ``PLUGIN_TRUST_POLICY`` is
+enforced before registration. Nothing here grants capabilities or loads plugin
+code.
 
 The ``scaffold`` command generates a valid plugin project from a template,
 including manifest.json, entry point, and a minimal test file.
@@ -164,11 +167,78 @@ def register_plugins_cli(app: Flask) -> None:
 
     @plugins_group.command("install")
     @click.argument("path")
+    @click.option(
+        "--remote",
+        is_flag=True,
+        help="Treat PATH as a plugin id from the operator catalog instead of a local path.",
+    )
+    @click.option("--version", default=None, help="Catalog version to install (implies --remote).")
     @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
-    def install_plugin(path: str, as_json: bool) -> int:
-        """Register a plugin from a local manifest directory (URLs refused)."""
-        from app.services.plugin_ops import install_from_local_dir
+    def install_plugin(path: str, remote: bool, version: str | None, as_json: bool) -> int:
+        """Install a plugin from a local manifest or the marketplace catalog.
+
+        Local paths remain the default. Use ``--remote`` (or ``--version``) to
+        resolve the positional argument as a catalog plugin id; the active
+        ``PLUGIN_TRUST_POLICY`` is enforced before registration.
+        """
+        from app.services.plugin_ops import (
+            RemoteInstallError,
+            install_from_catalog,
+            install_from_local_dir,
+        )
         from app.services.plugins import ManifestValidationError, PluginError
+
+        if remote or version is not None:
+            from app.services.plugin_catalog import (
+                CatalogEntryNotFoundError,
+                CatalogError,
+                CatalogUnavailableError,
+            )
+            from app.services.plugin_compat import (
+                IncompatibleCompatibilityError,
+                InvalidCompatibilityError,
+            )
+            from app.services.plugin_signatures import PublisherSignatureError
+            from app.services.plugin_trust import PluginTrustConfigError
+
+            plugin_id = (path or "").strip()
+            if not plugin_id:
+                _fail(
+                    "A plugin id is required for a remote install.",
+                    code=EXIT_ERROR,
+                    as_json=as_json,
+                )
+            try:
+                plugin, entry = install_from_catalog(plugin_id, version)
+            except CatalogEntryNotFoundError as exc:
+                _fail(str(exc), code=EXIT_NOT_FOUND, as_json=as_json)
+            except CatalogUnavailableError as exc:
+                _fail(f"Plugin catalog is not available: {exc}", code=EXIT_ERROR, as_json=as_json)
+            except CatalogError as exc:
+                _fail(f"Invalid plugin catalog: {exc}", code=EXIT_ERROR, as_json=as_json)
+            except (PublisherSignatureError, PluginTrustConfigError) as exc:
+                _fail(
+                    f"Trust policy refused the plugin: {exc}",
+                    code=EXIT_ERROR,
+                    as_json=as_json,
+                )
+            except (
+                IncompatibleCompatibilityError,
+                InvalidCompatibilityError,
+                ManifestValidationError,
+                RemoteInstallError,
+                PluginError,
+            ) as exc:
+                _fail(f"Invalid plugin: {exc}", code=EXIT_ERROR, as_json=as_json)
+
+            if as_json:
+                payload = plugin.to_dict()
+                payload["source"] = entry.source
+                payload["integrity"] = entry.integrity
+                _write_json(payload)
+            else:
+                click.echo(f"Installed plugin from catalog: {plugin.id} v{plugin.version}")
+            return EXIT_OK
 
         try:
             plugin = install_from_local_dir(path)

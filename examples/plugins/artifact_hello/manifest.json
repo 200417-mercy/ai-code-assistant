@@ -1,0 +1,13 @@
+{
+  "id": "artifact-hello",
+  "name": "Artifact Hello",
+  "version": "0.1.0",
+  "description": "Minimal example plugin packaged in the marketplace artifact format.",
+  "author": "AI Code Assistant contributors",
+  "entry_point": "plugin:HelloArtifactPlugin",
+  "capabilities": ["PROJECT_READ"],
+  "permissions": ["read:project:files"],
+  "configuration": {
+    "greeting": "Hello from the artifact-hello plugin"
+  }
+}
