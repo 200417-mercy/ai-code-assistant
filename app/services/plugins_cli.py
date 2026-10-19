@@ -1,4 +1,4 @@
-"""Operator-facing plugin management Flask CLI commands (#171, #413).
+"""Operator-facing plugin management Flask CLI commands (#171, #413, #397).
 
 Usage (inside the Flask app context):
 
@@ -8,6 +8,7 @@ Usage (inside the Flask app context):
     flask plugins disable <plugin_id>
     flask plugins install <local-path> [--json]
     flask plugins scaffold <plugin-id> [--output-dir <path>] [--json]
+    flask plugins lockfile <workspace-id> [--json]
     flask plugins publishers [--json]
     flask plugins errors [--json]
 
@@ -19,6 +20,8 @@ plugin code.
 
 The ``scaffold`` command generates a valid plugin project from a template,
 including manifest.json, entry point, and a minimal test file.
+
+The ``lockfile`` command prints the resolved plugin lockfile for a workspace.
 
 Exit codes: ``0`` success, ``1`` unknown plugin / missing argument, ``2``
 manifest validation or other service error. ``--json`` emits stable,
@@ -205,9 +208,7 @@ def register_plugins_cli(app: Flask) -> None:
             )
 
         # Determine output directory
-        target_dir = (
-            Path.cwd() / plugin_id if output_dir is None else Path(output_dir) / plugin_id
-        )
+        target_dir = Path.cwd() / plugin_id if output_dir is None else Path(output_dir) / plugin_id
 
         if target_dir.exists():
             _fail(
@@ -300,6 +301,37 @@ def register_plugins_cli(app: Flask) -> None:
                 f"{report['operation']} {report['exception_type'] or ''} {details}".rstrip()
             )
         click.echo(f"{len(reports)} plugin error report(s).")
+        return EXIT_OK
+
+    @plugins_group.command("lockfile")
+    @click.argument("workspace_id", type=int)
+    @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+    def lockfile(workspace_id: int, as_json: bool) -> int:
+        """Print the resolved plugin lockfile for a workspace.
+
+        Reuses the same service as the API to avoid drift.
+        """
+        from app.models import PluginLockEntry
+        from app.services.plugin_lockfile import build_lockfile
+
+        lock_entries = PluginLockEntry.query.filter_by(workspace_id=workspace_id).all()
+        if not lock_entries:
+            if as_json:
+                _write_json({"lockfile_version": 1, "plugins": []})
+            else:
+                click.echo("No lockfile entries found for this workspace.")
+            return EXIT_OK
+
+        lockfile = build_lockfile(lock_entries)
+        if as_json:
+            _write_json(lockfile)
+        else:
+            for plugin in lockfile["plugins"]:
+                line = (
+                    f"{plugin['plugin_id']} {plugin['version']} "
+                    f"{plugin['source']} {plugin['integrity']}"
+                )
+                click.echo(line)
         return EXIT_OK
 
 

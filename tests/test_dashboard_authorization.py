@@ -8,7 +8,6 @@ Tests cover:
 - Authorization enforced on every surface
 """
 
-
 from app.extensions import db
 from app.models import Conversation, Message, Project, User, Workspace, WorkspaceMember
 from app.models.workspace_member import ROLE_VIEWER, STATUS_ACTIVE

@@ -126,9 +126,11 @@ class TestMigrationHead:
     def test_head_is_latest_revision(self):
         result = _run_flask(["db", "heads"], {"DATABASE_URL": "sqlite:///:memory:"})
         assert result.returncode == 0, result.stderr
-        assert "0c1d2e3f4a5b" in (result.stdout + result.stderr)
-        assert "a9f8e7d6c5b4" in (result.stdout + result.stderr)
-        assert "f9e8d7c6b5a4" in (result.stdout + result.stderr)
+        output = result.stdout + result.stderr
+        assert "f0a1b2c3d4e5" in output
+        # The merge revision must be the single head (no dangling branches).
+        head_lines = [line for line in output.splitlines() if "(head)" in line]
+        assert len(head_lines) == 1
 
     def test_workspace_price_overrides_table_upgraded(self):
         expected = {
