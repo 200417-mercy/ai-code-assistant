@@ -16,6 +16,7 @@ from app.models.plugin_error_report import (
     MAX_ERROR_MESSAGE_CHARS,
     PluginErrorReport,
 )
+from app.services.plugin_limits import MAX_ERROR_REPORT_LIMIT, get_plugin_limits
 
 logger = logging.getLogger(__name__)
 
@@ -67,13 +68,20 @@ def record_plugin_error(
 
 
 def list_workspace_error_reports(
-    workspace_id: int, limit: int = WORKSPACE_ERROR_LIMIT
+    workspace_id: int, limit: int | None = None
 ) -> list[dict[str, Any]]:
-    """Return a workspace's plugin error reports, newest first (owner-scoped)."""
+    """Return a workspace's plugin error reports, newest first (owner-scoped).
+
+    ``limit`` defaults to the configured ``PLUGIN_ERROR_REPORT_LIMIT`` (#409);
+    explicit values are clamped to the same hard ceiling.
+    """
+    if limit is None:
+        limit = get_plugin_limits().error_report_limit
+    bounded = max(1, min(int(limit), MAX_ERROR_REPORT_LIMIT))
     rows = (
         PluginErrorReport.query.filter_by(workspace_id=workspace_id)
         .order_by(PluginErrorReport.id.desc())
-        .limit(max(1, min(int(limit), 500)))
+        .limit(bounded)
         .all()
     )
     return [row.to_dict() for row in rows]

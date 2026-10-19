@@ -70,6 +70,10 @@ fail-closed, so a fresh install cannot reach a marketplace or the network:
 | `PLUGIN_NETWORK_HTTPS_ONLY` | `1` | Plugin traffic must use HTTPS. |
 | `PLUGIN_NETWORK_ALLOW_PRIVATE` | `0` | Blocks private, loopback, and link-local targets. |
 | `PLUGIN_EXECUTION_TIMEOUT` | `5` | Abandons a plugin callback after five seconds so it cannot stall a request. |
+| `PLUGIN_CONFIG_MAX_BYTES` | `65536` | Caps the serialized size of a workspace plugin configuration. |
+| `PLUGIN_CONFIG_MAX_KEYS` | `200` | Caps the number of top-level configuration keys. |
+| `PLUGIN_CONFIG_MAX_DEPTH` | `8` | Caps configuration nesting depth. |
+| `PLUGIN_ERROR_REPORT_LIMIT` | `100` | Caps owner-visible error reports (hard ceiling `500`). |
 
 The catalog is read from disk for each install request; there is no active
 cache TTL setting yet (caching is tracked in #377). See

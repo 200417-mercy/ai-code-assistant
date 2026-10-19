@@ -43,6 +43,20 @@ def _db_uri() -> str:
     return uri
 
 
+def _positive_int_env(name: str, default: int) -> int:
+    """Read a positive integer environment setting.
+
+    A malformed or non-positive value falls back to ``default`` instead of
+    aborting startup: these settings are safety bounds, so losing one must not
+    make the application run unbounded.
+    """
+    try:
+        value = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
 def _trusted_plugin_keys() -> dict[str, str]:
     value = os.getenv("PLUGIN_TRUSTED_KEYS", "")
     if not value:
@@ -147,6 +161,15 @@ class Config:
     # bounded error report and dispatch continues with the remaining handlers.
     # Set to 0 (or negative) to disable the bound for local debugging.
     PLUGIN_EXECUTION_TIMEOUT = float(os.getenv("PLUGIN_EXECUTION_TIMEOUT", "5"))
+
+    # Plugin resource limits (#409). These bound the data a plugin can persist
+    # and the number of error reports an owner can read. Each setting is
+    # documented in docs/plugins.md and .env.example; invalid values fall back
+    # to the safe default rather than disabling the bound.
+    PLUGIN_CONFIG_MAX_BYTES = _positive_int_env("PLUGIN_CONFIG_MAX_BYTES", 64 * 1024)
+    PLUGIN_CONFIG_MAX_KEYS = _positive_int_env("PLUGIN_CONFIG_MAX_KEYS", 200)
+    PLUGIN_CONFIG_MAX_DEPTH = _positive_int_env("PLUGIN_CONFIG_MAX_DEPTH", 8)
+    PLUGIN_ERROR_REPORT_LIMIT = _positive_int_env("PLUGIN_ERROR_REPORT_LIMIT", 100)
 
     # Plugin outbound network policy (#193). Every plugin-triggered request must
     # pass ``app.services.plugin_network``: it is https-only, denies

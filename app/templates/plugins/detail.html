@@ -183,6 +183,7 @@
 <script>
   window.AICA_PLUGIN_DETAIL = {{ plugin|tojson }};
 </script>
+<script src="{{ url_for('static', filename='js/plugin_marketplace.js') }}"></script>
 <script src="{{ url_for('static', filename='js/plugin_badges.js') }}"></script>
 <script src="{{ url_for('static', filename='js/plugin_detail.js') }}"></script>
 {% endblock %}

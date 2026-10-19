@@ -14,7 +14,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from functools import lru_cache
+from functools import lru_cache, partial
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -476,11 +476,37 @@ class Plugin:
         Raises:
             PluginLoadError: If the manifest/entry point is invalid, the plugin
                 is not registered, or the import fails.
+
+        A load failure is isolated: the plugin stays registered with no module
+        attached, and (inside an app context) one bounded error report is
+        recorded. Loading never replaces an already-loaded module.
         """
-        loader = PluginEntryPointLoader(self.manifest, registry=registry)
-        self.module = loader.load()
+        try:
+            loader = PluginEntryPointLoader(self.manifest, registry=registry)
+            module = loader.load()
+        except Exception as exc:
+            self._record_error("load", exc)
+            raise
+        self.module = module
         self.loaded_at = datetime.now(UTC)
         logger.info(f"Loaded plugin: {self.manifest.id}")
+
+    def _record_error(self, operation: str, exc: BaseException) -> None:
+        """Best-effort bounded error report for a plugin boundary (#410).
+
+        Recording is only possible inside an app context and must never change
+        the isolation decision or mask the original error.
+        """
+        try:
+            from flask import has_app_context
+
+            if not has_app_context():
+                return
+            from app.services.plugin_errors import record_plugin_error
+
+            record_plugin_error(self.manifest.id, operation, exc=exc)
+        except Exception:  # pragma: no cover - recording must never break loading
+            logger.debug("Could not record plugin %s failure", operation, exc_info=True)
 
     def unload(self) -> None:
         """Unload plugin safely."""
@@ -519,6 +545,7 @@ class Plugin:
                 exc,
                 exc_info=True,
             )
+            self._record_error(f"hook:{hook}", exc)
             return {"hook": hook, "called": False, "ok": False, "error": str(exc)}
         method = getattr(instance, hook, None)
         if not callable(method):
@@ -533,6 +560,7 @@ class Plugin:
                 exc,
                 exc_info=True,
             )
+            self._record_error(f"hook:{hook}", exc)
             return {"hook": hook, "called": True, "ok": False, "error": str(exc)}
         return {"hook": hook, "called": True, "ok": True, "error": None}
 
@@ -758,7 +786,11 @@ class PluginRegistry:
         logger.info(f"Uninstalled plugin: {plugin_id}")
 
     def _run_hook(self, plugin: Plugin, hook: str) -> dict[str, Any]:
-        """Invoke a lifecycle hook, logging (never propagating) failures."""
+        """Invoke a lifecycle hook, logging (never propagating) failures.
+
+        The hook boundary records its own bounded error report
+        (:meth:`Plugin.invoke_hook`), so this method only logs the outcome.
+        """
         result = plugin.invoke_hook(hook)
         if result.get("ok") is False:
             logger.warning(
@@ -767,21 +799,7 @@ class PluginRegistry:
                 hook,
                 result.get("error"),
             )
-            self._record_hook_error(plugin.manifest.id, hook, result.get("error"))
         return result
-
-    def _record_hook_error(self, plugin_id: str, hook: str, message: Any) -> None:
-        """Best-effort bounded error report when running inside an app context."""
-        try:
-            from flask import has_app_context
-
-            if not has_app_context():
-                return
-            from app.services.plugin_errors import record_plugin_error
-
-            record_plugin_error(plugin_id, f"hook:{hook}", message=str(message))
-        except Exception:  # pragma: no cover - never let recording break lifecycle
-            logger.debug("Could not record plugin hook error report", exc_info=True)
 
     def validate_capability(self, plugin_id: str, capability: str) -> bool:
         """Check if plugin has capability.
@@ -814,11 +832,9 @@ class PluginRegistry:
     def dispatch(self, event_type: str, data: dict[str, Any] | None = None) -> None:
         """Dispatch event to subscribed plugins.
 
-        Failures are isolated - one plugin failure does not affect others.
-
-        Args:
-            event_type: Event type (e.g., "project.created")
-            data: Event data dictionary
+        Failures are isolated - one plugin failure does not affect others. Each
+        handler runs under the configured execution budget and a failure is
+        recorded as a bounded error report when an app context is available.
         """
         if not data:
             data = {}
@@ -826,12 +842,30 @@ class PluginRegistry:
         handlers = self._hooks.get(event_type, [])
         for plugin_id, handler in handlers:
             try:
-                handler(event_type=event_type, data=data)
+                run_with_timeout(
+                    partial(handler, event_type=event_type, data=data),
+                    operation=f"registry-dispatch:{event_type}",
+                )
             except Exception as e:
                 logger.error(
                     f"Error dispatching event {event_type} for plugin {plugin_id}: {e}",
                     exc_info=True,
                 )
+                self._record_dispatch_error(plugin_id, event_type, e)
+
+    @staticmethod
+    def _record_dispatch_error(plugin_id: str, event_type: str, exc: BaseException) -> None:
+        """Best-effort bounded report for a legacy registry dispatch failure."""
+        try:
+            from flask import has_app_context
+
+            if not has_app_context():
+                return
+            from app.services.plugin_errors import record_plugin_error
+
+            record_plugin_error(plugin_id, f"registry-dispatch:{event_type}", exc=exc)
+        except Exception:  # pragma: no cover - recording must not break dispatch
+            logger.debug("Could not record plugin dispatch error report", exc_info=True)
 
     def __len__(self) -> int:
         """Number of registered plugins."""
