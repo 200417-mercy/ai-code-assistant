@@ -36,8 +36,16 @@
 
   <div class="project-list">
     <h2>Registered plugins</h2>
-    <div id="plugin-list">
+    <div id="plugin-list" aria-live="polite">
       <p class="empty-note">Loading plugins…</p>
+    </div>
+  </div>
+
+  <div class="project-list" id="plugin-lockfile-section" hidden>
+    <h2>Lockfile</h2>
+    <p class="field-hint">The resolved versions, sources and artifact hashes pinned for this workspace. Configuration secrets are never shown.</p>
+    <div id="plugin-lockfile" aria-live="polite">
+      <p class="empty-note">Select a workspace to view its lockfile.</p>
     </div>
   </div>
 </div>
@@ -48,6 +56,7 @@
 {% endblock %}
 
 {% block scripts %}
+<script src="{{ url_for('static', filename='js/plugin_marketplace.js') }}"></script>
 <script src="{{ url_for('static', filename='js/plugin_badges.js') }}"></script>
 <script src="{{ url_for('static', filename='js/plugins.js') }}"></script>
 {% endblock %}

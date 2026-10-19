@@ -24,6 +24,10 @@
     options.headers = Object.assign({}, options.headers || {}, {
       "X-CSRFToken": getCsrf(),
     });
+    var marketplace = window.AICAPluginMarketplace;
+    if (marketplace && typeof marketplace.fetchJson === "function") {
+      return marketplace.fetchJson(url, options);
+    }
     return fetch(url, options).then(function (response) {
       return response.json().then(function (data) {
         if (!response.ok) {
@@ -32,6 +36,13 @@
         return data;
       });
     });
+  }
+
+  function errorMessage(error) {
+    if (error && error.code === "timeout") {
+      return "This request timed out. Please try again.";
+    }
+    return error && error.message ? error.message : "Something went wrong. Please try again.";
   }
 
   function showMessage(message, category) {
@@ -52,7 +63,7 @@
         if (success) success();
         else window.location.reload();
       })
-      .catch(function (error) { showMessage(error.message, "error"); });
+      .catch(function (error) { showMessage(errorMessage(error), "error"); });
   }
 
   function install() {
@@ -67,7 +78,7 @@
     if (!window.confirm("Uninstall " + PLUGIN.name + " from this workspace?")) return;
     api(basePath() + "/uninstall", { method: "POST" })
       .then(function () { window.location.href = "/plugins/"; })
-      .catch(function (error) { showMessage(error.message, "error"); });
+      .catch(function (error) { showMessage(errorMessage(error), "error"); });
   }
 
   function saveUpdate() {
@@ -94,7 +105,7 @@
       body: JSON.stringify({ version: version }),
     })
       .then(function () { window.location.reload(); })
-      .catch(function (error) { showMessage(error.message, "error"); });
+      .catch(function (error) { showMessage(errorMessage(error), "error"); });
   }
 
   function rollback(version) {
@@ -102,7 +113,7 @@
     if (!window.confirm("Roll back " + PLUGIN.name + " to " + label + "?")) return;
     api(basePath() + "/rollback", { method: "POST" })
       .then(function () { window.location.reload(); })
-      .catch(function (error) { showMessage(error.message, "error"); });
+      .catch(function (error) { showMessage(errorMessage(error), "error"); });
   }
 
   function checkUpdates() {
@@ -119,7 +130,7 @@
           "info"
         );
       })
-      .catch(function (error) { showMessage(error.message, "error"); });
+      .catch(function (error) { showMessage(errorMessage(error), "error"); });
   }
 
   function bind(id, handler) {

@@ -69,7 +69,6 @@ def notify(
     return notification
 
 
-
 def _id_of(obj) -> int | None:
     if obj is None:
         return None

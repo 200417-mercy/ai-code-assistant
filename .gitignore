@@ -38,6 +38,9 @@ instance/
 *.log
 logs/
 
+# Node / frontend test tooling
+node_modules/
+
 # Docker
 .docker/
 branch_structure.json

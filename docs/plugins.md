@@ -404,6 +404,21 @@ The Alembic migration for the table is tracked by the Phase 9 lockfile
 migration issue; the model and its serialization are covered by
 `tests/test_plugin_lock_entries.py`.
 
+The workspace plugin page renders this lockfile read-only for the workspace
+owner (#418): each pinned plugin row shows its id, version, source, integrity
+hash, and dependencies. Owners read it from
+`GET /plugins/api/workspaces/<id>/lockfile`; an empty lockfile renders an
+explicit empty state instead of a blank panel. Configuration values are never
+part of the lockfile payload, and source URLs have embedded credentials
+stripped before rendering, so the viewer cannot expose a secret.
+
+All marketplace surfaces (plugin list, lockfile, and detail actions) share the
+empty/error/timeout states in `app/static/js/plugin_marketplace.js` (#421).
+Failures show friendly copy and a **Retry** button, and requests are
+timeout-bounded so a stalled marketplace never leaves the UI loading forever.
+The state renderers are covered by
+`tests/js/plugin_marketplace.test.js`.
+
 ### Updating a plugin
 
 `POST .../plugins/<plugin_id>/update` accepts the same `{"manifest": {...}}`
@@ -455,9 +470,11 @@ plugin id, the operation (`dispatch:<event_type>`, `hook:<hook>`, …), the
 exception type, and a length-bounded message. **No stack traces, event
 payloads, or secrets are stored by default.**
 
-Recording happens automatically when a plugin dispatch handler raises (including
-when it exceeds `PLUGIN_EXECUTION_TIMEOUT`) and when a lifecycle hook fails or
-times out inside an app context; it is best-effort and never changes the
+Recording happens automatically at every plugin invocation boundary inside an
+app context: **loading** an entry point (`load`), **instantiating** a plugin
+class, running a **lifecycle hook** (`hook:<hook>`), **dispatching** an event
+handler (`dispatch:<event_type>`), and the legacy registry dispatcher
+(`registry-dispatch:<event_type>`). It is best-effort and never changes the
 existing failure-isolation behavior. Reports are read back owner-scoped via
 `GET /plugins/api/workspaces/<ws>/plugin-errors` (owner only,
 workspace-isolated) and operator-wide via `flask plugins errors [--json]`.
@@ -481,11 +498,40 @@ trusted, and plugin outbound traffic is denied until an operator opts in.
 | `PLUGIN_NETWORK_MAX_BYTES` | `2097152` | Maximum response body accepted from a plugin request (2 MiB). |
 | `PLUGIN_NETWORK_STRICT_DNS` | `0` | When enabled, an unresolvable host is rejected instead of tolerated. |
 | `PLUGIN_EXECUTION_TIMEOUT` | `5` | Seconds a plugin event handler or lifecycle hook may run before it is abandoned and recorded as a bounded error. `0` or negative disables the bound. |
+| `PLUGIN_CONFIG_MAX_BYTES` | `65536` | Maximum serialized size of a stored per-workspace plugin configuration. |
+| `PLUGIN_CONFIG_MAX_KEYS` | `200` | Maximum number of top-level keys in a stored plugin configuration. |
+| `PLUGIN_CONFIG_MAX_DEPTH` | `8` | Maximum nesting depth of a stored plugin configuration. |
+| `PLUGIN_ERROR_REPORT_LIMIT` | `100` | Maximum error reports returned to a workspace owner (hard ceiling `500`). |
 
 **Catalog cache:** there is no active cache TTL setting yet. The catalog file is
 validated and re-read for each install request, so an operator's catalog edit is
 visible immediately. A TTL cache and its `PLUGIN_MARKETPLACE_CACHE_TTL` setting
 are tracked separately in #377.
+
+### Resource limits and failure behavior (#409, #410)
+
+All plugin resource limits are configuration-driven
+(`app/services/plugin_limits.py`) and have conservative defaults. Invalid or
+non-positive values fall back to the default rather than disabling the bound;
+the execution timeout is the one deliberate exception, where `0` or a negative
+value disables the bound for local debugging. Defaults, the settings that
+override them, and the failure behavior are summarized below:
+
+| Boundary | Default bound | Behavior when exceeded |
+| -------- | ------------- | ---------------------- |
+| Event handler / lifecycle hook | `PLUGIN_EXECUTION_TIMEOUT=5` seconds | The callback is abandoned (daemon thread), one bounded error report is recorded, and dispatch continues with the remaining handlers. |
+| Stored workspace configuration | 64 KiB, 200 keys, depth 8 | The write is rejected with `400` and nothing is stored. |
+| Owner error-report read | 100 rows | The response is truncated to the configured limit (maximum 500). |
+| Outbound plugin HTTP | 15 seconds, 2 MiB | The request fails closed; see the network settings below. |
+
+Failure isolation covers every plugin invocation boundary: **loading** an
+entry point, **instantiating** the plugin class, running a **lifecycle hook**,
+and **dispatching** an event handler or legacy registry handler. A failure at
+any boundary is contained, leaves the registry consistent, and records one
+bounded report (`load`, `hook:<name>`, `dispatch:<event>`, or
+`registry-dispatch:<event>`). Requests still complete and other handlers still
+run. Regression tests inject failures at each boundary in
+`tests/test_plugin_failure_isolation.py`.
 
 Example production posture:
 
@@ -497,6 +543,10 @@ export PLUGIN_NETWORK_ALLOWLIST=plugins.example.com
 export PLUGIN_NETWORK_HTTPS_ONLY=1
 export PLUGIN_NETWORK_ALLOW_PRIVATE=0
 export PLUGIN_EXECUTION_TIMEOUT=5
+export PLUGIN_CONFIG_MAX_BYTES=65536
+export PLUGIN_CONFIG_MAX_KEYS=200
+export PLUGIN_CONFIG_MAX_DEPTH=8
+export PLUGIN_ERROR_REPORT_LIMIT=100
 ```
 
 ## Audit trail (capabilities & state)

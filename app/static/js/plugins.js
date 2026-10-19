@@ -7,6 +7,7 @@
 
   var WORKSPACE_ID = null;
   var IS_OWNER = false;
+  var MARKETPLACE = window.AICAPluginMarketplace || null;
 
   function getCsrf() {
     var meta = document.querySelector('meta[name="csrf-token"]');
@@ -35,6 +36,9 @@
     options.headers = Object.assign({}, options.headers || {}, {
       "X-CSRFToken": getCsrf(),
     });
+    if (MARKETPLACE && typeof MARKETPLACE.fetchJson === "function") {
+      return MARKETPLACE.fetchJson(url, options);
+    }
     return fetch(url, options).then(function (response) {
       return response.json().then(function (data) {
         if (!response.ok) {
@@ -48,9 +52,44 @@
   }
 
   function escapeHtml(text) {
+    if (MARKETPLACE && typeof MARKETPLACE.escapeHtml === "function") {
+      return MARKETPLACE.escapeHtml(text);
+    }
     return String(text == null ? "" : text).replace(/[&<>"']/g, function (c) {
       return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
     });
+  }
+
+  function showPanelState(container, kind, options, onRetry) {
+    if (!container) return;
+    if (MARKETPLACE && typeof MARKETPLACE.stateHtml === "function") {
+      container.innerHTML = MARKETPLACE.stateHtml(kind, options);
+    } else {
+      container.innerHTML = '<p class="empty-note">' + escapeHtml((options && options.message) || "") + "</p>";
+    }
+    if (onRetry) {
+      if (MARKETPLACE && typeof MARKETPLACE.bindRetry === "function") {
+        MARKETPLACE.bindRetry(container, onRetry);
+      } else {
+        var button = container.querySelector(".marketplace-retry");
+        if (button) button.addEventListener("click", onRetry);
+      }
+    }
+  }
+
+  function showPanelError(container, error, options, onRetry) {
+    if (!container) return;
+    if (MARKETPLACE && typeof MARKETPLACE.errorStateHtml === "function") {
+      container.innerHTML = MARKETPLACE.errorStateHtml(error, options);
+      if (onRetry && typeof MARKETPLACE.bindRetry === "function") {
+        MARKETPLACE.bindRetry(container, onRetry);
+      }
+    } else {
+      showPanelState(container, "error", options || {}, onRetry);
+    }
+    if (error && error.code === "timeout") {
+      flash("The marketplace request timed out. Please try again.", "warning");
+    }
   }
 
   function capabilityChips(caps) {
@@ -142,7 +181,10 @@
   function renderPlugins(data) {
     var list = document.getElementById("plugin-list");
     if (!data.plugins.length) {
-      list.innerHTML = '<p class="empty-note">No plugins registered. An owner can install a plugin above.</p>';
+      showPanelState(list, "empty", {
+        title: "No plugins available yet",
+        message: "An owner can install a plugin above, or install one from the catalog.",
+      });
       return;
     }
     var html = data.plugins.map(function (p) {
@@ -192,11 +234,47 @@
 
   function loadPlugins() {
     var list = document.getElementById("plugin-list");
-    list.innerHTML = '<p class="empty-note">Loading plugins…</p>';
+    showPanelState(list, "loading", { message: "Loading plugins…" });
     api("/plugins/api/workspaces/" + WORKSPACE_ID + "/plugins")
       .then(renderPlugins)
       .catch(function (error) {
-        list.innerHTML = '<p class="empty-note">' + escapeHtml(error.message) + "</p>";
+        showPanelError(list, error, {
+          title: "Could not load plugins",
+          message:
+            error && error.code === "timeout"
+              ? "The plugin list did not respond in time. Please try again."
+              : "We couldn’t load the plugins for this workspace. Please try again.",
+          retry: true,
+        }, loadPlugins);
+      });
+  }
+
+  function loadLockfile() {
+    var section = document.getElementById("plugin-lockfile-section");
+    var container = document.getElementById("plugin-lockfile");
+    if (!section || !container) return;
+
+    section.hidden = !IS_OWNER;
+    if (!IS_OWNER || !WORKSPACE_ID) return;
+
+    showPanelState(container, "loading", { message: "Loading lockfile…" });
+    api("/plugins/api/workspaces/" + WORKSPACE_ID + "/lockfile")
+      .then(function (data) {
+        if (MARKETPLACE && typeof MARKETPLACE.renderLockfile === "function") {
+          container.innerHTML = MARKETPLACE.renderLockfile(data);
+        } else {
+          container.innerHTML = '<p class="empty-note">Lockfile unavailable.</p>';
+        }
+      })
+      .catch(function (error) {
+        showPanelError(container, error, {
+          title: "Could not load the lockfile",
+          message:
+            error && error.code === "timeout"
+              ? "The lockfile did not respond in time. Please try again."
+              : "We couldn’t load the resolved plugin lockfile. Please try again.",
+          retry: true,
+        }, loadLockfile);
       });
   }
 
@@ -208,10 +286,12 @@
     var installBox = document.getElementById("plugin-install-box");
     var banner = document.getElementById("plugin-role-banner");
     var status = document.getElementById("plugin-install-status");
+    var lockfileSection = document.getElementById("plugin-lockfile-section");
 
     if (!workspaceId) {
       page.hidden = true;
       empty.hidden = false;
+      if (lockfileSection) lockfileSection.hidden = true;
       return;
     }
 
@@ -223,12 +303,23 @@
       if (status) status.hidden = true;
       page.hidden = false;
       empty.hidden = true;
+      message.hidden = true;
       loadPlugins();
-    }).catch(function () {
-      page.hidden = true;
-      empty.hidden = false;
-      message.hidden = false;
-      message.textContent = "You cannot manage plugins for this workspace.";
+      loadLockfile();
+    }).catch(function (error) {
+      page.hidden = false;
+      empty.hidden = true;
+      IS_OWNER = false;
+      installBox.hidden = true;
+      if (lockfileSection) lockfileSection.hidden = true;
+      showPanelError(document.getElementById("plugin-list"), error, {
+        title: "Could not open this workspace",
+        message:
+          error && error.code === "timeout"
+            ? "Loading the workspace timed out. Please try again."
+            : "We couldn’t load your role for this workspace. Please try again.",
+        retry: true,
+      }, function () { setWorkspace(workspaceId); });
     });
   }
 

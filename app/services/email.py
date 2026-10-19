@@ -20,10 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 def _smtp_configured() -> bool:
-    return bool(
-        current_app.config.get("SMT_HOST")
-        and current_app.config.get("SMTP_PORT")
-    )
+    return bool(current_app.config.get("SMT_HOST") and current_app.config.get("SMTP_PORT"))
 
 
 def send_email(to: str, subject: str, text_body: str, html_body: str | None = None) -> bool:

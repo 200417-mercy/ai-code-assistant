@@ -1959,6 +1959,68 @@ a:hover {
   gap: 6px;
 }
 
+/* Marketplace empty / error / timeout states (#421) and the lockfile viewer
+   (#418). States always include text and a retry affordance, so they are not
+   color-only and never leave a blank panel. */
+.marketplace-state {
+  padding: 18px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+}
+
+.marketplace-state-title {
+  margin: 0 0 4px;
+  font-weight: 600;
+}
+
+.marketplace-state .empty-note {
+  margin: 0 0 10px;
+}
+
+.marketplace-state-error,
+.marketplace-state-timeout {
+  border-color: var(--warning);
+}
+
+.marketplace-state .marketplace-retry {
+  margin-top: 4px;
+}
+
+.plugin-lockfile-summary {
+  margin-bottom: 8px;
+}
+
+.plugin-lockfile-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.plugin-lockfile-table th,
+.plugin-lockfile-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.plugin-lockfile-table th {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.plugin-lockfile-hash {
+  display: inline-block;
+  max-width: 320px;
+  word-break: break-all;
+}
+
+.table-scroll {
+  overflow-x: auto;
+}
+
 .cap-chip {
   display: inline-block;
   background: var(--bg-elevated);

@@ -71,9 +71,7 @@ def test_preferences_disable_alerts():
 
 def test_email_fallback_when_no_recipient():
     sender = _Recorder()
-    service = alerts.AlertService(
-        sender=sender.send, default_recipient="billing@ops.local"
-    )
+    service = alerts.AlertService(sender=sender.send, default_recipient="billing@ops.local")
     service.set_threshold(user_id="u4", amount=1)
 
     service.record_usage(user_id="u4", amount=10)
