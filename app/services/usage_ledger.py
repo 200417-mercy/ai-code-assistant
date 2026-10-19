@@ -10,6 +10,7 @@ Only metadata is stored. Prompts and completions are never written here.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import or_
@@ -50,6 +51,12 @@ BACKFILL_REQUEST_PREFIX = "backfill:message:"
 STATUS_SUCCESS = "success"
 STATUS_ERROR = "error"
 STATUS_DENIED = "denied"
+
+#: Default usage retention window (days) when the app config does not set one.
+DEFAULT_RETENTION_DAYS = 365
+
+#: Smallest allowed retention window, so a purge can never target "today".
+MIN_RETENTION_DAYS = 1
 
 
 def normalize_source(source: Any) -> str | None:
@@ -524,10 +531,78 @@ def backfill_from_messages(
     return stats
 
 
+def retention_days_from_config(config: Any | None = None) -> int:
+    """Return the configured usage retention window in days.
+
+    Reads ``USAGE_RETENTION_DAYS`` from ``config`` (a Flask config or mapping).
+    Falls back to the current app config when available, then to
+    :data:`DEFAULT_RETENTION_DAYS`. Values below :data:`MIN_RETENTION_DAYS` are
+    clamped so a purge can never target rows from the current day.
+    """
+    source = config
+    if source is None:
+        from flask import current_app, has_app_context
+
+        if has_app_context():
+            source = current_app.config
+    value = None
+    if source is not None:
+        try:
+            value = source.get("USAGE_RETENTION_DAYS")
+        except AttributeError:
+            value = None
+    try:
+        days = int(value) if value is not None else DEFAULT_RETENTION_DAYS
+    except (TypeError, ValueError):
+        days = DEFAULT_RETENTION_DAYS
+    return max(days, MIN_RETENTION_DAYS)
+
+
+def purge_records(
+    *,
+    retention_days: int | None = None,
+    now: datetime | None = None,
+    dry_run: bool = False,
+    commit: bool = True,
+) -> dict:
+    """Delete usage rows older than the retention window.
+
+    A row is purged only when its ``created_at`` is **strictly older** than
+    ``cutoff`` (``now - retention_days``). Rows at or newer than the cutoff are
+    always retained, so a boundary row is never removed. ``dry_run`` reports the
+    count without deleting anything.
+
+    Returns a stats dict describing the window and the number removed.
+    """
+    if retention_days is None:
+        retention_days = retention_days_from_config()
+    if not isinstance(retention_days, int) or retention_days < MIN_RETENTION_DAYS:
+        raise ValueError(f"retention_days must be an integer >= {MIN_RETENTION_DAYS}")
+
+    moment = now or datetime.now(UTC)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    cutoff = moment - timedelta(days=retention_days)
+
+    stale_query = UsageRecord.query.filter(UsageRecord.created_at < cutoff)
+    deleted = stale_query.count() if dry_run else stale_query.delete(synchronize_session=False)
+    if commit and not dry_run:
+        db.session.commit()
+
+    return {
+        "retention_days": retention_days,
+        "cutoff": cutoff.isoformat(),
+        "deleted": int(deleted),
+        "dry_run": bool(dry_run),
+    }
+
+
 __all__ = [
     "BACKFILL_DEFAULT_BATCH_SIZE",
     "BACKFILL_MAX_BATCH_SIZE",
     "BACKFILL_REQUEST_PREFIX",
+    "DEFAULT_RETENTION_DAYS",
+    "MIN_RETENTION_DAYS",
     "SOURCES",
     "SOURCE_ANALYSIS",
     "SOURCE_CHAT",
@@ -545,8 +620,10 @@ __all__ = [
     "estimate_cost",
     "normalize_source",
     "normalize_usage",
+    "purge_records",
     "query_records",
     "record_usage",
+    "retention_days_from_config",
     "source_bucket",
     "summarize_records",
 ]
