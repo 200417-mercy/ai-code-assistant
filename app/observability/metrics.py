@@ -61,7 +61,7 @@ class Counter:
             if self.label_names:
                 pairs = ",".join(
                     f'{name}="{_escape(val)}"'
-                    for name, val in zip(self.label_names, key)
+                    for name, val in zip(self.label_names, key, strict=False)
                 )
                 lines.append(f"{self.name}{{{pairs}}} {_format_value(value)}")
             else:
@@ -73,9 +73,7 @@ class Registry:
     def __init__(self) -> None:
         self._counters: list[Counter] = []
 
-    def counter(
-        self, name: str, help_text: str, label_names: tuple[str, ...] = ()
-    ) -> Counter:
+    def counter(self, name: str, help_text: str, label_names: tuple[str, ...] = ()) -> Counter:
         counter = Counter(name, help_text, label_names)
         self._counters.append(counter)
         return counter
@@ -127,13 +125,9 @@ def record_usage(
 ) -> None:
     """Record LLM usage. Never raises on missing values."""
     if prompt_tokens and prompt_tokens > 0:
-        LLM_TOKENS.inc(
-            prompt_tokens, provider=provider, model=model, direction="in"
-        )
+        LLM_TOKENS.inc(prompt_tokens, provider=provider, model=model, direction="in")
     if completion_tokens and completion_tokens > 0:
-        LLM_TOKENS.inc(
-            completion_tokens, provider=provider, model=model, direction="out"
-        )
+        LLM_TOKENS.inc(completion_tokens, provider=provider, model=model, direction="out")
     if cost_usd and cost_usd > 0:
         LLM_COST.inc(cost_usd, provider=provider, model=model)
 

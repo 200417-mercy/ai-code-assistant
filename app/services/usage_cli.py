@@ -3,10 +3,14 @@
 Usage::
 
     flask usage backfill [--batch-size N] [--limit N] [--dry-run] [--json]
+    flask usage purge [--days N] [--dry-run] [--json]
 
 The backfill copies historical ``Message`` token columns into the append-only
 usage ledger. It never updates message rows, is safe to re-run, and processes
 messages in bounded keyset pages.
+
+The purge removes usage rows older than the retention window (default from
+``USAGE_RETENTION_DAYS``); rows newer than the cutoff are never touched.
 """
 
 from __future__ import annotations
@@ -86,6 +90,40 @@ def register_usage_cli(app: Flask) -> None:
             f"skipped_incomplete={result['skipped_incomplete']} "
             f"skipped_orphan={result['skipped_orphan']} "
             f"batches={result['batches']}"
+        )
+        return EXIT_OK
+
+    @usage_group.command("purge")
+    @click.option(
+        "--days",
+        type=click.IntRange(min=1),
+        default=None,
+        help="Retention window in days (default: USAGE_RETENTION_DAYS).",
+    )
+    @click.option(
+        "--dry-run",
+        is_flag=True,
+        help="Report what would be deleted without removing rows.",
+    )
+    @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+    def purge(days: int | None, dry_run: bool, as_json: bool) -> int:
+        """Delete usage rows older than the retention window."""
+        from app.services.usage_ledger import purge_records
+
+        try:
+            result = purge_records(retention_days=days, dry_run=dry_run)
+        except ValueError as exc:
+            _fail(str(exc), as_json=as_json)
+
+        if as_json:
+            _write_json(result)
+            return EXIT_OK
+
+        action = "Dry run" if dry_run else "Purge"
+        click.echo(
+            f"{action} complete: deleted={result['deleted']} "
+            f"retention_days={result['retention_days']} "
+            f"cutoff={result['cutoff']}"
         )
         return EXIT_OK
 

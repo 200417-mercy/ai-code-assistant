@@ -10,9 +10,7 @@ from app.observability.metrics import (
     Counter,
 )
 
-SAMPLE_LINE = re.compile(
-    r"^[a-zA-Z_:][a-zA-Z0-9_:]*(\{[^}]*\})? -?\d+(\.\d+)?([eE][+-]?\d+)?$"
-)
+SAMPLE_LINE = re.compile(r"^[a-zA-Z_:][a-zA-Z0-9_:]*(\{[^}]*\})? -?\d+(\.\d+)?([eE][+-]?\d+)?$")
 
 
 def make_app(**config):
@@ -90,8 +88,7 @@ def test_request_counter_uses_route_pattern_not_raw_path(client):
     client.get("/items/2")
     body = client.get("/metrics").get_data(as_text=True)
     assert (
-        'http_requests_total{method="GET",endpoint="/items/<int:item_id>",'
-        'status="2xx"} 2'
+        'http_requests_total{method="GET",endpoint="/items/<int:item_id>",' 'status="2xx"} 2'
     ) in body
     assert "/items/1" not in body
 
@@ -100,9 +97,7 @@ def test_unknown_paths_share_one_series(client):
     client.get("/nope-1")
     client.get("/nope-2")
     body = client.get("/metrics").get_data(as_text=True)
-    assert (
-        'http_requests_total{method="GET",endpoint="unmatched",status="4xx"} 2'
-    ) in body
+    assert ('http_requests_total{method="GET",endpoint="unmatched",status="4xx"} 2') in body
 
 
 def test_token_and_cost_counters_are_published(client):

@@ -33,7 +33,7 @@ from app.models import (
 )
 from app.models.message_attachment import ALLOWED_IMAGE_TYPES
 from app.models.project import STATUS_READY
-from app.services import audit, chat_export, token_usage
+from app.services import audit, chat_export, token_usage, usage_ledger
 from app.services.conversation_search import search_conversations
 from app.services.github import (
     GitHubError,
@@ -802,6 +802,31 @@ def get_attachment(attachment_id: int):
     )
 
 
+def _record_chat_ledger(conversation: Conversation, usage: dict | None) -> None:
+    """Append exactly one usage-ledger row for a completed chat response.
+
+    Callers invoke this only when an assistant message was actually persisted,
+    so an empty stream that falls back to a single completion records one row
+    (from the completion), never two. The row joins the caller's transaction
+    (``commit=False``) so message and usage are stored atomically.
+    """
+    counts = usage or {}
+    provider, model = usage_ledger.current_provider_metadata(user=current_user)
+    usage_ledger.record_usage(
+        source=usage_ledger.SOURCE_CHAT,
+        prompt_tokens=counts.get("prompt_tokens", 0),
+        completion_tokens=counts.get("completion_tokens", 0),
+        total_tokens=counts.get("total_tokens"),
+        tokens_estimated=bool(counts.get("tokens_estimated", True)),
+        user=current_user,
+        conversation=conversation,
+        provider=counts.get("provider") or provider,
+        model=counts.get("model") or model,
+        status=usage_ledger.STATUS_SUCCESS,
+        commit=False,
+    )
+
+
 @bp.route("/conversations/<int:conversation_id>/messages", methods=["POST"])
 @login_required
 def send_message(conversation_id: int):
@@ -857,6 +882,7 @@ def send_message(conversation_id: int):
 
     usage = token_usage.usage_from_response(response, messages)
     conversation.messages.append(Message(role="assistant", content=response.content, **usage))
+    _record_chat_ledger(conversation, usage)
     if conversation.title == "New conversation":
         conversation.title = content.strip()[:60] or "New conversation"
     db.session.commit()
@@ -913,6 +939,8 @@ def stream_message(conversation_id: int):
             return None
         message = Message(role="assistant", content=reply, **(usage or {}))
         conversation.messages.append(message)
+        # One ledger row per persisted reply (streamed, cancelled or fallback).
+        _record_chat_ledger(conversation, usage)
         db.session.commit()
         return message
 

@@ -205,9 +205,7 @@ def register_plugins_cli(app: Flask) -> None:
             )
 
         # Determine output directory
-        target_dir = (
-            Path.cwd() / plugin_id if output_dir is None else Path(output_dir) / plugin_id
-        )
+        target_dir = Path.cwd() / plugin_id if output_dir is None else Path(output_dir) / plugin_id
 
         if target_dir.exists():
             _fail(
