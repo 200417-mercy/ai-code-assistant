@@ -23,8 +23,14 @@ from pathlib import Path
 from flask import current_app
 
 from app.extensions import db
-from app.models import Plugin
+from app.models import Plugin, PluginLockEntry, Workspace
+from app.services.plugin_catalog import CatalogEntry, load_plugin_catalog
 from app.services.plugin_compat import enforce_compatible
+from app.services.plugin_lockfile import LockfileError, normalize_integrity
+from app.services.plugin_signatures import (
+    VERIFY_IF_PRESENT,
+    enforce_publisher_trust,
+)
 from app.services.plugins import (
     ManifestValidationError,
     PluginError,
@@ -204,7 +210,7 @@ def install_from_local_dir(path: str) -> Plugin:
 
 
 def update_plugin(plugin_id: str, manifest: PluginManifest) -> Plugin:
-    """Apply a validated manifest to an already-registered plugin.
+    """Apply a validated manifest to an already-registered plugin atomically.
 
     Updates are identity-bound like installs: the manifest id must equal
     ``plugin_id`` and the entry point must not change, so an update can never
@@ -220,6 +226,7 @@ def update_plugin(plugin_id: str, manifest: PluginManifest) -> Plugin:
 
     Capability grants are intentionally not modified: they stay explicit and
     per-workspace, and are managed only through the capability endpoints.
+    Any failure rolls the transaction back, so the prior version stays active.
     """
     plugin = get_plugin(plugin_id)
 
@@ -238,6 +245,21 @@ def update_plugin(plugin_id: str, manifest: PluginManifest) -> Plugin:
         subject=f"Plugin {plugin_id} {manifest.version}",
     )
 
+    try:
+        _apply_manifest(plugin, manifest)
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        raise
+    return plugin
+
+
+class AtomicUpdateError(PluginUpdateError):
+    """A catalog update/rollback could not be applied without partial state."""
+
+
+def _apply_manifest(plugin: Plugin, manifest: PluginManifest) -> None:
+    """Copy validated manifest fields onto ``plugin`` without committing."""
     plugin.name = manifest.name
     plugin.version = manifest.version
     plugin.description = manifest.description
@@ -249,22 +271,213 @@ def update_plugin(plugin_id: str, manifest: PluginManifest) -> Plugin:
     plugin.configuration = dict(manifest.configuration or {})
     plugin.trust_state = manifest.trust_state
     plugin.trust_publisher = manifest.trust_publisher
-    db.session.commit()
+
+
+def _validated_catalog_manifest(
+    entry: CatalogEntry,
+    *,
+    trusted_publishers,
+    policy: str,
+) -> PluginManifest:
+    """Validate a catalog entry's manifest and enforce the trust policy."""
+    manifest = PluginManifest.from_dict(
+        entry.manifest,
+        trusted_publishers=trusted_publishers,
+        trust_policy=VERIFY_IF_PRESENT,
+    )
+    signature = entry.signature if entry.signature is not None else entry.manifest.get("signature")
+    trust = enforce_publisher_trust(
+        entry.manifest,
+        signature,
+        trusted_publishers=trusted_publishers,
+        policy=policy,
+    )
+    manifest.trust_state = trust.state
+    manifest.trust_publisher = trust.publisher
+    return manifest
+
+
+def _upsert_lock_entry(
+    plugin: Plugin,
+    workspace_id: int,
+    entry: CatalogEntry,
+    integrity: str,
+) -> None:
+    """Mirror the resolved artifact into the workspace lock entry (no commit)."""
+    row = PluginLockEntry.query.filter_by(
+        workspace_id=workspace_id,
+        plugin_id=plugin.id,
+    ).first()
+    if row is None:
+        workspace = db.session.get(Workspace, workspace_id)
+        owner_id = getattr(workspace, "user_id", None)
+        if owner_id is None:
+            raise AtomicUpdateError("Workspace not found for the plugin lock entry")
+        row = PluginLockEntry(
+            workspace_id=workspace_id,
+            owner_id=owner_id,
+            plugin_id=plugin.id,
+        )
+        db.session.add(row)
+    row.version = entry.version
+    row.source = entry.source
+    row.integrity = integrity
+    row.dependencies = list(entry.manifest.get("dependencies") or [])
+
+
+def atomic_update_from_catalog(
+    plugin_id: str,
+    version: str | None = None,
+    *,
+    workspace_id: int | None = None,
+    config=None,
+    catalog=None,
+) -> tuple[Plugin, CatalogEntry]:
+    """Update an installed plugin to a catalog version in one transaction (#401).
+
+    Every guard runs **before** any field is changed:
+
+    * the manifest is schema-validated and identity-bound (same id/entry point);
+    * the active ``PLUGIN_TRUST_POLICY`` verifies the publisher signature;
+    * the catalog sha256 integrity is validated/normalized;
+    * the declared compatibility range includes the running app.
+
+    The plugin row (and, when ``workspace_id`` is supplied, its lock entry) are
+    then swapped in a single commit. Any failure rolls the transaction back, so
+    the prior version stays active and no partial state is left behind.
+    """
+    source = config if config is not None else current_app.config
+    active_catalog = catalog if catalog is not None else load_plugin_catalog(source)
+    entry = active_catalog.get(plugin_id, version)
+
+    trusted_publishers = source.get("PLUGIN_TRUSTED_KEYS") or {}
+    policy = source.get("PLUGIN_TRUST_POLICY", VERIFY_IF_PRESENT)
+    manifest = _validated_catalog_manifest(
+        entry,
+        trusted_publishers=trusted_publishers,
+        policy=policy,
+    )
+    try:
+        integrity = normalize_integrity(entry.integrity)
+    except LockfileError as exc:
+        raise AtomicUpdateError(f"Invalid artifact integrity: {exc}") from exc
+
+    enforce_compatible(manifest.compatibility, subject=f"Plugin {manifest.id}")
+
+    plugin = get_plugin(plugin_id)
+    if manifest.id != plugin_id:
+        raise PluginUpdateError(
+            f"Manifest id {manifest.id!r} does not match the plugin being updated "
+            f"({plugin_id!r})."
+        )
+    if manifest.entry_point != plugin.entry_point:
+        raise PluginEntryPointMismatchError(
+            f"Manifest entry_point does not match the registered plugin {plugin_id}."
+        )
+
+    try:
+        _apply_manifest(plugin, manifest)
+        if workspace_id is not None:
+            _upsert_lock_entry(plugin, workspace_id, entry, integrity)
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        raise
+    return plugin, entry
+
+
+def atomic_rollback(
+    plugin_id: str,
+    manifest: PluginManifest,
+    *,
+    workspace_id: int | None = None,
+) -> Plugin:
+    """Apply a rollback manifest and its lock version in a single transaction.
+
+    Used for the lock-entry rollback path: the target version comes from the
+    workspace lockfile. A failure rolls back both the plugin row and the lock
+    entry, leaving the current version active.
+    """
+    plugin = get_plugin(plugin_id)
+    if manifest.id != plugin_id:
+        raise PluginUpdateError(
+            f"Manifest id {manifest.id!r} does not match the plugin being rolled back "
+            f"({plugin_id!r})."
+        )
+    if manifest.entry_point != plugin.entry_point:
+        raise PluginEntryPointMismatchError(
+            f"Manifest entry_point does not match the registered plugin {plugin_id}."
+        )
+    enforce_compatible(manifest.compatibility, subject=f"Plugin {plugin_id} {manifest.version}")
+
+    try:
+        _apply_manifest(plugin, manifest)
+        if workspace_id is not None:
+            row = PluginLockEntry.query.filter_by(
+                workspace_id=workspace_id,
+                plugin_id=plugin_id,
+            ).first()
+            if row is not None:
+                row.version = manifest.version
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        raise
     return plugin
 
 
+def rollback_from_catalog(
+    plugin_id: str,
+    *,
+    workspace_id: int | None = None,
+    config=None,
+    catalog=None,
+) -> tuple[Plugin, CatalogEntry]:
+    """Roll a plugin back to the newest catalog version older than the current one.
+
+    Uses the same atomic update path, so a failed rollback leaves the current
+    version active.
+    """
+    from app.services.plugin_versions import is_newer, latest_version
+
+    source = config if config is not None else current_app.config
+    plugin = get_plugin(plugin_id)
+    active_catalog = catalog if catalog is not None else load_plugin_catalog(source)
+    older = [
+        entry.version
+        for entry in active_catalog.list_entries()
+        if entry.plugin_id == plugin_id and is_newer(plugin.version, entry.version)
+    ]
+    target = latest_version(older)
+    if target is None:
+        raise AtomicUpdateError(
+            f"No earlier version of plugin {plugin_id} is available in the catalog."
+        )
+    return atomic_update_from_catalog(
+        plugin_id,
+        target,
+        workspace_id=workspace_id,
+        config=source,
+        catalog=active_catalog,
+    )
+
+
 __all__ = [
+    "AtomicUpdateError",
     "ManifestValidationError",
     "PluginDependencyResolutionError",
     "PluginError",
     "PluginManifest",
     "PluginNotFoundError",
     "PluginUpdateError",
+    "atomic_rollback",
+    "atomic_update_from_catalog",
     "discover_plugins",
     "get_plugin",
     "install_from_local_dir",
     "list_plugins",
     "resolve_plugin_dependencies",
+    "rollback_from_catalog",
     "set_plugin_enabled",
     "update_plugin",
 ]

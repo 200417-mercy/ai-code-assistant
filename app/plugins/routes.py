@@ -52,10 +52,14 @@ from app.services.plugin_compat import (
 from app.services.plugin_config import validate_plugin_config
 from app.services.plugin_errors import list_workspace_error_reports
 from app.services.plugin_ops import (
+    AtomicUpdateError,
     PluginEntryPointMismatchError,
     PluginNotFoundError,
     PluginUpdateError,
+    atomic_rollback,
+    atomic_update_from_catalog,
     discover_plugins,
+    rollback_from_catalog,
     update_plugin,
 )
 from app.services.plugin_signatures import (
@@ -67,6 +71,8 @@ from app.services.plugin_trust import (
     PluginTrustConfigError,
     trusted_publisher_ids,
 )
+from app.services.plugin_updates import notify_available_updates, update_plan
+from app.services.plugin_versions import is_newer
 from app.services.plugins import ManifestValidationError, PluginError, PluginManifest
 
 #: Hard maximum number of plugins returned in a single marketplace page (#379).
@@ -323,11 +329,13 @@ def detail(workspace_id: int, plugin_id: str):
     plugin = Plugin.query.filter_by(id=plugin_id).first()
     if plugin is None:
         abort(404)
+    plan = update_plan(plugin, workspace_id=workspace_id)
     return render_template(
         "plugins/detail.html",
         workspace=workspace,
         plugin=_serialize(plugin, workspace_id),
         update_manifest=_manifest_payload(plugin),
+        update_plan=plan,
     )
 
 
@@ -809,6 +817,115 @@ def api_update_plugin(workspace_id: int, plugin_id: str):
 
 
 # --------------------------------------------------------------------------
+# API: available updates, atomic catalog update, update notifications
+# --------------------------------------------------------------------------
+
+
+@bp.route("/api/workspaces/<int:workspace_id>/plugins/<plugin_id>/update-plan", methods=["GET"])
+@login_required
+def api_update_plan(workspace_id: int, plugin_id: str):
+    """Return the current version, available update and rollback target (#403)."""
+    resolve_workspace(workspace_id)
+    plugin = Plugin.query.filter_by(id=plugin_id).first()
+    if plugin is None:
+        return jsonify({"error": "Plugin not found."}), 404
+    return jsonify(update_plan(plugin, workspace_id=workspace_id))
+
+
+@bp.route(
+    "/api/workspaces/<int:workspace_id>/plugins/<plugin_id>/update-from-catalog",
+    methods=["POST"],
+)
+@login_required
+@require_workspace_capability("manage_plugins")
+def api_update_from_catalog(workspace_id: int, plugin_id: str):
+    """Atomically update an installed plugin to a catalog version (#401/#403).
+
+    The manifest, publisher signature, artifact integrity and compatibility are
+    verified before the plugin row (and its lock entry) are swapped in a single
+    transaction. A failure leaves the current version active.
+    """
+    if _installation(plugin_id, workspace_id) is None:
+        return jsonify({"error": "Plugin is not installed in this workspace."}), 404
+
+    data = request.get_json(silent=True) or {}
+    version = data.get("version")
+    if version is not None and (not isinstance(version, str) or not version.strip()):
+        return jsonify({"error": "version must be a non-empty string when provided."}), 400
+
+    try:
+        plugin, entry = atomic_update_from_catalog(
+            plugin_id,
+            version.strip() if version is not None else None,
+            workspace_id=workspace_id,
+        )
+    except CatalogEntryNotFoundError as exc:
+        return jsonify({"error": str(exc)}), 404
+    except CatalogUnavailableError as exc:
+        return jsonify({"error": str(exc)}), 404
+    except CatalogError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except (PublisherSignatureError, PluginTrustConfigError) as exc:
+        record_plugin_audit(
+            workspace_id,
+            "denied",
+            actor=current_user,
+            plugin_id=plugin_id,
+            outcome="denied",
+            reason="update refused by trust policy",
+        )
+        db.session.commit()
+        return jsonify({"error": str(exc)}), 403
+    except PluginEntryPointMismatchError as exc:
+        db.session.rollback()
+        return jsonify({"error": str(exc)}), 409
+    except (
+        AtomicUpdateError,
+        PluginUpdateError,
+        PluginNotFoundError,
+        ManifestValidationError,
+        IncompatibleCompatibilityError,
+        InvalidCompatibilityError,
+        PluginError,
+    ) as exc:
+        db.session.rollback()
+        return jsonify({"error": str(exc)}), 400
+
+    record_plugin_audit(
+        workspace_id,
+        "granted",
+        actor=current_user,
+        plugin_id=plugin_id,
+        capability="update",
+        outcome="success",
+        reason=f"updated to {entry.version}",
+    )
+    db.session.commit()
+    emit_event(
+        "plugin.updated",
+        data={"plugin_id": plugin_id, "version": entry.version},
+        workspace_id=workspace_id,
+        user_id=current_user.id,
+    )
+    return jsonify(_serialize(plugin, workspace_id))
+
+
+@bp.route("/api/workspaces/<int:workspace_id>/plugins/check-updates", methods=["POST"])
+@login_required
+@require_workspace_capability("manage_plugins")
+def api_check_plugin_updates(workspace_id: int):
+    """Notify the workspace owner once per newly available plugin version (#404)."""
+    workspace = resolve_workspace(workspace_id)
+    created = notify_available_updates(workspace)
+    return jsonify(
+        {
+            "created": len(created),
+            "notifications": [notification.to_dict() for notification in created],
+        }
+    )
+
+
+# --------------------------------------------------------------------------
 # API: plugin rollback (owner only)
 # --------------------------------------------------------------------------
 
@@ -819,78 +936,47 @@ def api_update_plugin(workspace_id: int, plugin_id: str):
 def api_rollback_plugin(workspace_id: int, plugin_id: str):
     """Rollback a plugin to its previous version.
 
-    Uses the lockfile entry to find the previous version and restores it.
-    If no previous version exists in the lockfile, returns an error.
+    The workspace lock entry is used when it points at an older version;
+    otherwise the newest catalog version older than the installed one is used.
+    Both paths apply atomically and leave the current version active on failure.
     """
     installation = _installation(plugin_id, workspace_id)
     if installation is None:
         return jsonify({"error": "Plugin is not installed in this workspace."}), 404
 
-    # Find the previous version from the lockfile
+    plugin = Plugin.query.filter_by(id=plugin_id).first()
+    if plugin is None:
+        return jsonify({"error": "Plugin not found."}), 404
+    current_version = plugin.version
+
     lock_entry = PluginLockEntry.query.filter_by(
         workspace_id=workspace_id,
         plugin_id=plugin_id,
     ).first()
 
-    if lock_entry is None:
-        return jsonify({"error": "No lockfile entry found for rollback."}), 404
-
-    # Check if there's a previous version (we need to track this)
-    # For now, we'll rollback to the version in the lockfile
-    previous_version = lock_entry.version
-
-    # Get the plugin
-    plugin = Plugin.query.filter_by(id=plugin_id).first()
-    if plugin is None:
-        return jsonify({"error": "Plugin not found."}), 404
-
-    current_version = plugin.version
-
-    if current_version == previous_version:
-        return jsonify({"error": "Plugin is already at the target version."}), 400
-
-    # Create a manifest for the rollback
-    from app.services.plugins import PluginManifest
-
-    manifest = PluginManifest(
-        id=plugin.id,
-        name=plugin.name,
-        version=previous_version,
-        description=plugin.description,
-        author=plugin.author,
-        entry_point=plugin.entry_point,
-        capabilities=plugin.capabilities or [],
-        permissions=plugin.permissions or [],
-        dependencies=plugin.dependencies or [],
-        compatibility=plugin.compatibility,
-        configuration=plugin.configuration or {},
-        trust_state=plugin.trust_state,
-        trust_publisher=plugin.trust_publisher,
-    )
-
     try:
-        # Update the plugin to the previous version
-        from app.services.plugin_ops import update_plugin
-
-        plugin = update_plugin(plugin_id, manifest)
-
-        # Update the lockfile entry to reflect the rollback
-        lock_entry.version = previous_version
-        db.session.commit()
-
-        # Audit the rollback
-        record_plugin_audit(
-            workspace_id,
-            "granted",
-            actor=current_user,
-            plugin_id=plugin_id,
-            capability="rollback",
-            outcome="success",
-            reason=f"rolled back from {current_version} to {previous_version}",
-        )
-
-        return jsonify(_serialize(plugin, workspace_id))
-    except Exception as exc:
+        if lock_entry is not None and is_newer(current_version, lock_entry.version):
+            manifest = PluginManifest(
+                id=plugin.id,
+                name=plugin.name,
+                version=lock_entry.version,
+                description=plugin.description,
+                author=plugin.author,
+                entry_point=plugin.entry_point,
+                capabilities=plugin.capabilities or [],
+                permissions=plugin.permissions or [],
+                dependencies=plugin.dependencies or [],
+                compatibility=plugin.compatibility,
+                configuration=plugin.configuration or {},
+                trust_state=plugin.trust_state,
+                trust_publisher=plugin.trust_publisher,
+            )
+            plugin = atomic_rollback(plugin_id, manifest, workspace_id=workspace_id)
+            target_version = manifest.version
+        else:
+            plugin, entry = rollback_from_catalog(plugin_id, workspace_id=workspace_id)
+            target_version = entry.version
+    except (AtomicUpdateError, PluginUpdateError) as exc:
         db.session.rollback()
         record_plugin_audit(
             workspace_id,
@@ -901,6 +987,27 @@ def api_rollback_plugin(workspace_id: int, plugin_id: str):
             reason=f"rollback failed: {exc!s}",
         )
         return jsonify({"error": str(exc)}), 400
+    except (CatalogUnavailableError, CatalogError) as exc:
+        db.session.rollback()
+        return jsonify({"error": str(exc)}), 404
+
+    record_plugin_audit(
+        workspace_id,
+        "granted",
+        actor=current_user,
+        plugin_id=plugin_id,
+        capability="rollback",
+        outcome="success",
+        reason=f"rolled back from {current_version} to {target_version}",
+    )
+    db.session.commit()
+    emit_event(
+        "plugin.rolled_back",
+        data={"plugin_id": plugin_id, "version": target_version},
+        workspace_id=workspace_id,
+        user_id=current_user.id,
+    )
+    return jsonify(_serialize(plugin, workspace_id))
 
 
 @bp.route("/api/workspaces/<int:workspace_id>/plugins/<plugin_id>/enable", methods=["POST"])
