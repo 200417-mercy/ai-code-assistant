@@ -204,8 +204,18 @@ class TestPolicyFromConfig:
 
 
 class _FakeResponse:
-    def __init__(self, headers: dict[str, str] | None = None):
+    def __init__(
+        self,
+        headers: dict[str, str] | None = None,
+        *,
+        content: bytes = b"",
+        status_code: int = 200,
+        is_redirect: bool = False,
+    ):
         self.headers = headers or {}
+        self.content = content
+        self.status_code = status_code
+        self.is_redirect = is_redirect
 
 
 class _FakeSession:
@@ -272,6 +282,75 @@ class TestGuardedRequest:
                 resolver=PUBLIC_RESOLVER,
             )
             assert session.calls[0][0] == method
+
+    def test_redirect_response_is_refused_and_not_followed(self):
+        session = _FakeSession(
+            _FakeResponse(
+                {"Location": "http://127.0.0.1/private"},
+                status_code=302,
+                is_redirect=True,
+            )
+        )
+        with pytest.raises(PluginNetworkError, match="redirect"):
+            guarded_request(
+                "GET",
+                "https://api.example.com/x",
+                policy=ALLOW_ALL,
+                session=session,
+                resolver=PUBLIC_RESOLVER,
+            )
+
+        # Exactly one request was made: the redirect target was never visited.
+        assert len(session.calls) == 1
+        assert session.calls[0][2]["allow_redirects"] is False
+
+    def test_three_hundred_status_is_refused_even_without_is_redirect(self):
+        session = _FakeSession(_FakeResponse(status_code=307))
+        with pytest.raises(PluginNetworkError, match="redirect"):
+            guarded_request(
+                "GET",
+                "https://api.example.com/x",
+                policy=ALLOW_ALL,
+                session=session,
+                resolver=PUBLIC_RESOLVER,
+            )
+
+    def test_chunked_body_over_the_cap_is_rejected(self):
+        session = _FakeSession(_FakeResponse(content=b"x" * 11))
+        with pytest.raises(PluginNetworkError, match="byte cap"):
+            guarded_request(
+                "GET",
+                "https://api.example.com/x",
+                policy=PluginNetworkPolicy(allowlist=("*",), max_bytes=10),
+                session=session,
+                resolver=PUBLIC_RESOLVER,
+            )
+
+    def test_body_at_the_cap_is_allowed(self):
+        response = _FakeResponse(content=b"x" * 10)
+        session = _FakeSession(response)
+        assert (
+            guarded_request(
+                "GET",
+                "https://api.example.com/x",
+                policy=PluginNetworkPolicy(allowlist=("*",), max_bytes=10),
+                session=session,
+                resolver=PUBLIC_RESOLVER,
+            )
+            is response
+        )
+
+    def test_explicit_max_bytes_is_honoured(self):
+        session = _FakeSession(_FakeResponse({"Content-Length": "5"}, content=b"12345"))
+        selected = guarded_request(
+            "GET",
+            "https://api.example.com/x",
+            policy=PluginNetworkPolicy(allowlist=("*",), max_bytes=100),
+            session=session,
+            resolver=PUBLIC_RESOLVER,
+            max_bytes=5,
+        )
+        assert selected is session.response
 
 
 class TestModuleHelpers:

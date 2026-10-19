@@ -2,6 +2,7 @@
 
 import pytest
 
+from app.services import pricing
 from app.services.pricing import (
     DEFAULT_PRICE_TABLE,
     ESTIMATE_DISCLAIMER,
@@ -205,3 +206,155 @@ class TestCostArithmeticAndClamping:
             completion_tokens=MAX_TOKEN_COUNT * 5,
         )
         assert cost == pytest.approx(MAX_TOKEN_COUNT / 1000 * price.output_per_1k_usd)
+
+
+class TestWorkspacePriceOverrides:
+    """Per-workspace overrides take precedence over the global table (#442)."""
+
+    def _workspace(self, db, make_user, name="Pricing"):
+        from app.models import Workspace
+
+        user = make_user(username="price-owner", email="price-owner@example.com")
+        workspace = Workspace(user_id=user.id, name=name)
+        db.session.add(workspace)
+        db.session.commit()
+        return user, workspace
+
+    def test_override_wins_over_global_exact_price(self, db, make_user):
+        user, workspace = self._workspace(db, make_user)
+        pricing.set_workspace_price_override(
+            workspace=workspace,
+            provider="OpenAI",
+            model="GPT-4O",
+            input_per_1k_usd=9.0,
+            output_per_1k_usd=11.0,
+            user=user,
+        )
+
+        global_price = pricing.get_model_price("openai", "gpt-4o")
+        effective = pricing.get_model_price("openai", "gpt-4o", workspace_id=workspace.id)
+
+        assert effective is not None
+        assert effective.input_per_1k_usd == 9.0
+        assert effective.output_per_1k_usd == 11.0
+        assert effective.estimated is False
+        assert effective != global_price
+
+    def test_global_price_is_the_fallback_when_no_override_exists(self, db, make_user):
+        _, workspace = self._workspace(db, make_user)
+
+        effective = pricing.get_model_price("openai", "gpt-4o", workspace_id=workspace.id)
+
+        assert effective == pricing.get_model_price("openai", "gpt-4o")
+
+    def test_workspace_wildcard_beats_global_exact_and_provider_fallbacks(self, db, make_user):
+        user, workspace = self._workspace(db, make_user)
+        pricing.set_workspace_price_override(
+            workspace=workspace,
+            provider="openai",
+            model="*",
+            input_per_1k_usd=1.5,
+            output_per_1k_usd=2.5,
+            user=user,
+        )
+
+        assert (
+            pricing.get_model_price("openai", "gpt-4o", workspace_id=workspace.id).input_per_1k_usd
+            == 1.5
+        )
+        assert (
+            pricing.get_model_price(
+                "openai", "a-new-model", workspace_id=workspace.id
+            ).input_per_1k_usd
+            == 1.5
+        )
+        # A different provider still falls back to the global table.
+        assert pricing.get_model_price(
+            "anthropic", "claude-3-5-sonnet-latest", workspace_id=workspace.id
+        ) == pricing.get_model_price("anthropic", "claude-3-5-sonnet-latest")
+
+    def test_estimate_uses_workspace_rates(self, db, make_user):
+        user, workspace = self._workspace(db, make_user)
+        pricing.set_workspace_price_override(
+            workspace=workspace,
+            provider="openai",
+            model="gpt-4o",
+            input_per_1k_usd=2.0,
+            output_per_1k_usd=4.0,
+            user=user,
+        )
+
+        cost = pricing.estimate_cost_usd(
+            "openai",
+            "gpt-4o",
+            prompt_tokens=1_000,
+            completion_tokens=500,
+            workspace_id=workspace.id,
+        )
+
+        assert cost == pytest.approx(2.0 + 2.0)
+
+    def test_upsert_updates_one_row_and_delete_removes_it(self, db, make_user):
+        from app.models import WorkspacePriceOverride
+
+        user, workspace = self._workspace(db, make_user)
+        pricing.set_workspace_price_override(workspace, "openai", "gpt-4o", 1.0, 2.0, user=user)
+        pricing.set_workspace_price_override(workspace, "openai", "gpt-4o", 3.0, 4.0, user=user)
+
+        rows = pricing.list_workspace_price_overrides(workspace.id, user=user)
+        assert len(rows) == 1
+        assert rows[0].input_per_1k_usd == 3.0
+        assert WorkspacePriceOverride.query.count() == 1
+
+        assert (
+            pricing.delete_workspace_price_override(workspace, "openai", "gpt-4o", user=user)
+            is True
+        )
+        assert WorkspacePriceOverride.query.count() == 0
+        assert (
+            pricing.delete_workspace_price_override(workspace, "openai", "gpt-4o", user=user)
+            is False
+        )
+
+    def test_overrides_are_owner_scoped(self, db, make_user):
+        from app.models import WorkspaceMember
+
+        owner, workspace = self._workspace(db, make_user)
+        member = make_user(username="price-member", email="price-member@example.com")
+        db.session.add(WorkspaceMember(workspace_id=workspace.id, user_id=member.id))
+        db.session.commit()
+
+        with pytest.raises(PermissionError):
+            pricing.set_workspace_price_override(
+                workspace, "openai", "gpt-4o", 1.0, 2.0, user=member
+            )
+        with pytest.raises(PermissionError):
+            pricing.list_workspace_price_overrides(workspace.id, user=member)
+
+        # The owner can still manage the same workspace.
+        row = pricing.set_workspace_price_override(
+            workspace, "openai", "gpt-4o", 1.0, 2.0, user=owner
+        )
+        assert row.workspace_id == workspace.id
+
+    def test_invalid_rates_and_keys_are_rejected(self, db, make_user):
+        user, workspace = self._workspace(db, make_user)
+
+        with pytest.raises(pricing.PriceOverrideError):
+            pricing.set_workspace_price_override(workspace, "", "gpt-4o", 1, 2, user=user)
+        with pytest.raises(pricing.PriceOverrideError):
+            pricing.set_workspace_price_override(workspace, "openai", "gpt-4o", -1, 2, user=user)
+        with pytest.raises(pricing.PriceOverrideError):
+            pricing.set_workspace_price_override(
+                workspace, "openai", "gpt-4o", 1, float("inf"), user=user
+            )
+
+    def test_price_table_for_workspace_includes_overrides(self, db, make_user):
+        user, workspace = self._workspace(db, make_user)
+        pricing.set_workspace_price_override(workspace, "openai", "gpt-4o", 7.0, 8.0, user=user)
+
+        grouped = pricing.price_table(workspace_id=workspace.id)
+        entry = next(item for item in grouped["openai"] if item["model"] == "gpt-4o")
+
+        assert entry["input_per_1k_usd"] == 7.0
+        assert entry["output_per_1k_usd"] == 8.0

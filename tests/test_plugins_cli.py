@@ -189,3 +189,62 @@ class TestInstallCommand:
         result = _runner(app).invoke(args=["plugins", "install", missing])
         assert result.exit_code == 2
         assert "Manifest file not found" in result.output
+
+
+class TestScaffoldCommand:
+    def test_scaffold_creates_valid_plugin(self, app, tmp_path):
+        result = _runner(app).invoke(
+            args=["plugins", "scaffold", "my-plugin", "--output-dir", str(tmp_path)]
+        )
+        assert result.exit_code == 0
+        target_dir = tmp_path / "my-plugin"
+        assert target_dir.exists()
+        assert (target_dir / "manifest.json").exists()
+        assert (target_dir / "plugin.py").exists()
+        assert (target_dir / "test_plugin.py").exists()
+
+        # Validate manifest
+        import json
+
+        manifest = json.loads((target_dir / "manifest.json").read_text())
+        assert manifest["id"] == "my-plugin"
+        assert manifest["entry_point"] == "my_plugin.plugin:MyPluginPlugin"
+        assert manifest["capabilities"] == ["PROJECT_READ"]
+
+    def test_scaffold_json_output(self, app, tmp_path):
+        result = _runner(app).invoke(
+            args=["plugins", "scaffold", "json-plugin", "--output-dir", str(tmp_path), "--json"]
+        )
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["plugin_id"] == "json-plugin"
+        assert "directory" in data
+        assert data["files"] == ["manifest.json", "plugin.py", "test_plugin.py"]
+
+    def test_scaffold_refuses_invalid_id(self, app, tmp_path):
+        result = _runner(app).invoke(
+            args=["plugins", "scaffold", "MyPlugin", "--output-dir", str(tmp_path)]
+        )
+        assert result.exit_code == 2
+        assert "Plugin ID must be lowercase" in result.output
+
+    def test_scaffold_refuses_existing_directory(self, app, tmp_path):
+        (tmp_path / "existing-plugin").mkdir()
+        result = _runner(app).invoke(
+            args=["plugins", "scaffold", "existing-plugin", "--output-dir", str(tmp_path)]
+        )
+        assert result.exit_code == 2
+        assert "Directory already exists" in result.output
+
+    def test_scaffold_validates_generated_manifest(self, app, tmp_path):
+        # This test ensures the scaffold command validates its own output
+        result = _runner(app).invoke(
+            args=["plugins", "scaffold", "validate-plugin", "--output-dir", str(tmp_path)]
+        )
+        assert result.exit_code == 0
+        target_dir = tmp_path / "validate-plugin"
+        # The manifest should be valid
+        from app.services.plugins import PluginManifest
+
+        manifest = PluginManifest.from_file(target_dir / "manifest.json")
+        assert manifest.id == "validate-plugin"

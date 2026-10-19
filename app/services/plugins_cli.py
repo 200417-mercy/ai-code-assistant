@@ -1,4 +1,4 @@
-"""Operator-facing plugin management Flask CLI commands (#171).
+"""Operator-facing plugin management Flask CLI commands (#171, #413).
 
 Usage (inside the Flask app context):
 
@@ -7,6 +7,7 @@ Usage (inside the Flask app context):
     flask plugins enable <plugin_id>
     flask plugins disable <plugin_id>
     flask plugins install <local-path> [--json]
+    flask plugins scaffold <plugin-id> [--output-dir <path>] [--json]
     flask plugins publishers [--json]
     flask plugins errors [--json]
 
@@ -15,6 +16,9 @@ persisted ``Plugin`` rows and never performs per-user workspace authorization.
 Installation is **local-only** — a filesystem path with a validated
 ``manifest.json``; URLs are refused. Nothing here grants capabilities or loads
 plugin code.
+
+The ``scaffold`` command generates a valid plugin project from a template,
+including manifest.json, entry point, and a minimal test file.
 
 Exit codes: ``0`` success, ``1`` unknown plugin / missing argument, ``2``
 manifest validation or other service error. ``--json`` emits stable,
@@ -173,6 +177,83 @@ def register_plugins_cli(app: Flask) -> None:
             click.echo(f"Installed plugin: {plugin.id} v{plugin.version}")
         return EXIT_OK
 
+    @plugins_group.command("scaffold")
+    @click.argument("plugin_id")
+    @click.option(
+        "--output-dir",
+        "output_dir",
+        default=None,
+        help="Directory to write scaffold (default: cwd/<plugin-id>).",
+    )
+    @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+    def scaffold_plugin(plugin_id: str, output_dir: str | None, as_json: bool) -> int:
+        """Generate a valid plugin scaffold from a template.
+
+        Creates a plugin directory with manifest.json, entry point (plugin.py),
+        and a minimal test file. Validates the generated manifest before writing.
+        """
+        import re
+        from pathlib import Path
+
+        # Validate plugin_id format (kebab-case or snake_case)
+        if not re.match(r"^[a-z][a-z0-9_-]*$", plugin_id):
+            _fail(
+                "Plugin ID must be lowercase alphanumeric with hyphens "
+                "or underscores, starting with a letter.",
+                code=EXIT_ERROR,
+                as_json=as_json,
+            )
+
+        # Determine output directory
+        target_dir = (
+            Path.cwd() / plugin_id if output_dir is None else Path(output_dir) / plugin_id
+        )
+
+        if target_dir.exists():
+            _fail(
+                f"Directory already exists: {target_dir}",
+                code=EXIT_ERROR,
+                as_json=as_json,
+            )
+
+        # Create scaffold files
+        manifest = _generate_manifest(plugin_id)
+        plugin_py = _generate_plugin_py(plugin_id)
+        test_py = _generate_test_py(plugin_id)
+
+        try:
+            target_dir.mkdir(parents=True, exist_ok=False)
+            (target_dir / "manifest.json").write_text(manifest, encoding="utf-8")
+            (target_dir / "plugin.py").write_text(plugin_py, encoding="utf-8")
+            (target_dir / "test_plugin.py").write_text(test_py, encoding="utf-8")
+        except OSError as exc:
+            _fail(f"Failed to write scaffold: {exc}", code=EXIT_ERROR, as_json=as_json)
+
+        # Validate the generated manifest
+        from app.services.plugins import ManifestValidationError, PluginError, PluginManifest
+
+        try:
+            PluginManifest.from_file(target_dir / "manifest.json")
+        except (ManifestValidationError, PluginError) as exc:
+            # Clean up on validation failure
+            import shutil
+
+            shutil.rmtree(target_dir, ignore_errors=True)
+            _fail(f"Generated manifest validation failed: {exc}", code=EXIT_ERROR, as_json=as_json)
+
+        if as_json:
+            _write_json(
+                {
+                    "plugin_id": plugin_id,
+                    "directory": str(target_dir),
+                    "files": ["manifest.json", "plugin.py", "test_plugin.py"],
+                }
+            )
+        else:
+            click.echo(f"Scaffold created at: {target_dir}")
+            click.echo("Files: manifest.json, plugin.py, test_plugin.py")
+        return EXIT_OK
+
     @plugins_group.command("publishers")
     @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
     def list_publishers(as_json: bool) -> int:
@@ -220,3 +301,185 @@ def register_plugins_cli(app: Flask) -> None:
             )
         click.echo(f"{len(reports)} plugin error report(s).")
         return EXIT_OK
+
+
+def _generate_manifest(plugin_id: str) -> str:
+    """Generate a valid manifest.json for the plugin scaffold."""
+    import json
+
+    module_name = plugin_id.replace("-", "_")
+    class_name = module_name.replace("_", " ").title().replace(" ", "") + "Plugin"
+
+    manifest = {
+        "id": plugin_id,
+        "name": plugin_id.replace("-", " ").replace("_", " ").title(),
+        "version": "0.1.0",
+        "description": f"Example plugin generated from scaffold: {plugin_id}",
+        "author": "AI Code Assistant contributors",
+        "entry_point": f"{module_name}.plugin:{class_name}",
+        "capabilities": ["PROJECT_READ"],
+        "permissions": ["read:project:files"],
+        "configuration": {"example_setting": "default_value"},
+    }
+    return json.dumps(manifest, indent=2, sort_keys=True)
+
+
+def _generate_plugin_py(plugin_id: str) -> str:
+    """Generate the plugin.py entry point for the scaffold."""
+    module_name = plugin_id.replace("-", "_")
+    class_name = module_name.replace("_", " ").title().replace(" ", "") + "Plugin"
+
+    return f'''"""Example plugin generated from scaffold: {plugin_id}.
+
+See the plugin developer guide for the full walkthrough. Importing this
+module has no side effects: nothing is subscribed until ``register()``
+(called from ``on_enable``) runs.
+"""
+
+from __future__ import annotations
+
+from app.services.events import Event, get_dispatcher
+
+PLUGIN_ID = "{plugin_id}"
+EVENT_TYPE = "project.created"
+
+
+class {class_name}:
+    """Record ``project.created`` events and expose the latest one."""
+
+    def __init__(self, app=None, manifest=None):
+        self.app = app
+        self.manifest = manifest
+        self.seen_project_ids: list[int] = []
+
+    def register(self) -> None:
+        """Subscribe to ``project.created`` (idempotent)."""
+        dispatcher = get_dispatcher()
+        dispatcher.unsubscribe(EVENT_TYPE, self.on_event)
+        dispatcher.subscribe(EVENT_TYPE, self.on_event, plugin_id=PLUGIN_ID)
+
+    def on_event(self, event):
+        """Handle an event. Handlers must not raise; return safe data instead."""
+        project_id = (event.data or {{}}).get("project_id")
+        self.seen_project_ids.append(project_id)
+        return {{"plugin": PLUGIN_ID, "event": event.event_type, "project_id": project_id}}
+
+    def on_enable(self) -> None:
+        """Lifecycle hook: subscribe once the plugin is enabled."""
+        self.register()
+
+    def on_disable(self) -> None:
+        """Lifecycle hook: stop receiving events while disabled."""
+        get_dispatcher().unsubscribe(EVENT_TYPE, self.on_event)
+
+
+def main() -> None:
+    """Load the example from its manifest and exercise the registry flow."""
+    from app.services.plugins import Plugin, PluginManifest, PluginRegistry
+
+    manifest = PluginManifest.from_file(Path(__file__).with_name("manifest.json"))
+    registry = PluginRegistry()
+    plugin = Plugin(manifest)
+    plugin.load()
+    registry.register(plugin)
+
+    instance: {class_name} = plugin.get_instance()
+    instance.register()
+    try:
+        # A host application would instead dispatch real ``project.created``
+        # events; here we dispatch one directly so the example is self-contained.
+        event = Event(
+            event_type="project.created",
+            data={{"project_id": 42}},
+            workspace_id=1,
+            user_id=1,
+        )
+        instance.on_event(event)
+    finally:
+        get_dispatcher().unsubscribe(EVENT_TYPE, instance.on_event)
+
+    print(f"{{manifest.id}} registered; recorded {{len(instance.seen_project_ids)}} event(s).")
+
+
+if __name__ == "__main__":
+    main()
+'''
+
+
+def _generate_test_py(plugin_id: str) -> str:
+    """Generate a minimal test file for the plugin scaffold."""
+    class_name = plugin_id.replace("-", "_").replace("_", " ").title().replace(" ", "") + "Plugin"
+    module_name = plugin_id.replace("-", "_")
+
+    return f'''"""Tests for the {plugin_id} plugin scaffold."""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import pytest
+
+from app.services.events import Event, get_dispatcher
+from app.services.plugins import Plugin, PluginManifest, PluginRegistry
+
+# Make the scaffold directory importable
+SCAFFOLD_DIR = Path(__file__).parent
+sys.path.insert(0, str(SCAFFOLD_DIR))
+
+try:
+    from {module_name}.plugin import {class_name}, main
+finally:
+    sys.path.remove(str(SCAFFOLD_DIR))
+
+
+def test_manifest_validates_against_schema():
+    """The generated manifest must satisfy the published JSON schema."""
+    manifest = PluginManifest.from_file(SCAFFOLD_DIR / "manifest.json")
+
+    assert manifest.id == "{plugin_id}"
+    assert manifest.entry_point == "{module_name}.plugin:{class_name}"
+    assert manifest.capabilities == ["PROJECT_READ"]
+
+
+def test_plugin_loads_and_registers():
+    """The plugin must load and register through the real plugin services."""
+    manifest = PluginManifest.from_file(SCAFFOLD_DIR / "manifest.json")
+    registry = PluginRegistry()
+    plugin = Plugin(manifest)
+
+    plugin.load()
+    registry.register(plugin)
+
+    assert registry.get("{plugin_id}") is plugin
+    assert plugin.module is not None
+    assert getattr(plugin.module, "{class_name}", None) is not None
+
+
+def test_plugin_subscribes_and_records_events():
+    """The plugin must subscribe to events and record them."""
+    manifest = PluginManifest.from_file(SCAFFOLD_DIR / "manifest.json")
+    plugin = Plugin(manifest)
+    plugin.load()
+    instance = plugin.get_instance()
+
+    instance.register()
+    try:
+        subscribers = get_dispatcher().list_subscribers("project.created")
+        assert "{plugin_id}" in subscribers["project.created"]
+
+        event = Event(event_type="project.created", data={{"project_id": 42}})
+        instance.on_event(event)
+    finally:
+        get_dispatcher().unsubscribe("project.created", instance.on_event)
+
+    assert [e.data["project_id"] for e in instance.seen_project_ids] == [42]
+
+
+def test_main_runs_end_to_end(capsys):
+    """The plugin's main function exercises the registry flow."""
+    main()
+
+    output = capsys.readouterr().out
+    assert "{plugin_id} registered; recorded 1 event(s)." in output
+'''

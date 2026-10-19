@@ -80,7 +80,7 @@ from app.models.workspace_member import (
     ROLE_VIEWER,
     STATUS_ACTIVE,
 )
-from app.services import project_analysis, usage_ledger
+from app.services import pricing, project_analysis, usage_ledger
 from app.services.activity import record_activity
 from app.services.events import emit_event
 from app.services.exporting import export_filename, iter_export_zip
@@ -1499,3 +1499,133 @@ def api_project_analyze(project_id: int):
             user_id=current_user.id,
         )
     return jsonify(result)
+
+
+# --------------------------------------------------------------------------
+# API: per-workspace price overrides (Phase 10, issue #442)
+# --------------------------------------------------------------------------
+
+
+def _pricing_payload(workspace_id: int) -> dict:
+    """Return the effective prices and explicit overrides for a workspace."""
+    rows = pricing.list_workspace_price_overrides(
+        workspace_id=workspace_id,
+        user=current_user,
+    )
+    return {
+        "workspace_id": workspace_id,
+        "overrides": [row.to_dict() for row in rows],
+        "effective": pricing.price_table(workspace_id=workspace_id),
+    }
+
+
+def _override_inputs(data: dict) -> list[dict]:
+    """Extract one or more override objects from a request body."""
+    if not isinstance(data, dict):
+        raise pricing.PriceOverrideError("A JSON object is required.")
+    if "overrides" in data:
+        entries = data.get("overrides")
+        if not isinstance(entries, list) or not entries:
+            raise pricing.PriceOverrideError("overrides must be a non-empty list.")
+    else:
+        entries = [data]
+    if any(not isinstance(entry, dict) for entry in entries):
+        raise pricing.PriceOverrideError("Each override must be an object.")
+    return entries
+
+
+@bp.route("/api/workspaces/<int:workspace_id>/pricing", methods=["GET"])
+@bp.route("/api/workspaces/<int:workspace_id>/pricing/overrides", methods=["GET"])
+@login_required
+@require_workspace_capability("manage_billing")
+def api_get_workspace_pricing(workspace_id: int):
+    """Return effective prices plus the workspace's explicit overrides.
+
+    Owner-only: overrides are billing data. The effective table applies the
+    workspace overrides over the global defaults so clients never have to merge
+    the two themselves.
+    """
+    return jsonify(_pricing_payload(workspace_id))
+
+
+@bp.route(
+    "/api/workspaces/<int:workspace_id>/pricing/overrides",
+    methods=["PUT", "POST"],
+)
+@login_required
+@require_workspace_capability("manage_billing")
+def api_set_workspace_pricing_override(workspace_id: int):
+    """Create or update one or more provider/model price overrides (owner only)."""
+    try:
+        entries = _override_inputs(request.get_json(silent=True) or {})
+        for entry in entries:
+            pricing.set_workspace_price_override(
+                workspace_id=workspace_id,
+                provider=entry.get("provider"),
+                model=entry.get("model"),
+                input_per_1k_usd=entry.get("input_per_1k_usd", 0),
+                output_per_1k_usd=entry.get("output_per_1k_usd", 0),
+                user=current_user,
+            )
+    except PermissionError as exc:
+        return jsonify({"error": str(exc)}), 403
+    except (pricing.PriceOverrideError, ValueError) as exc:
+        db.session.rollback()
+        return jsonify({"error": str(exc)}), 400
+
+    return jsonify(_pricing_payload(workspace_id))
+
+
+@bp.route(
+    "/api/workspaces/<int:workspace_id>/pricing/overrides",
+    methods=["DELETE"],
+)
+@login_required
+@require_workspace_capability("manage_billing")
+def api_delete_workspace_pricing_override(workspace_id: int):
+    """Delete one workspace price override (owner only)."""
+    data = request.get_json(silent=True) or {}
+    provider = data.get("provider") or request.args.get("provider")
+    model = data.get("model") or request.args.get("model")
+    try:
+        removed = pricing.delete_workspace_price_override(
+            workspace_id=workspace_id,
+            provider=provider,
+            model=model,
+            user=current_user,
+        )
+    except PermissionError as exc:
+        return jsonify({"error": str(exc)}), 403
+    except (pricing.PriceOverrideError, ValueError) as exc:
+        db.session.rollback()
+        return jsonify({"error": str(exc)}), 400
+
+    if not removed:
+        return jsonify({"error": "Price override not found."}), 404
+    return jsonify(_pricing_payload(workspace_id))
+
+
+@bp.route(
+    "/api/workspaces/<int:workspace_id>/pricing/overrides/<provider>/<path:model>",
+    methods=["DELETE"],
+)
+@login_required
+@require_workspace_capability("manage_billing")
+def api_delete_workspace_pricing_override_by_path(workspace_id: int, provider: str, model: str):
+    """Delete one workspace price override addressed by provider and model."""
+    try:
+        removed = pricing.delete_workspace_price_override(
+            workspace_id=workspace_id,
+            provider=provider,
+            model=model,
+            user=current_user,
+        )
+    except PermissionError as exc:
+        return jsonify({"error": str(exc)}), 403
+    except (pricing.PriceOverrideError, ValueError) as exc:
+        db.session.rollback()
+        return jsonify({"error": str(exc)}), 400
+
+    if not removed:
+        return jsonify({"error": "Price override not found."}), 404
+    return jsonify(_pricing_payload(workspace_id))

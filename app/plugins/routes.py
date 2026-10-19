@@ -13,16 +13,29 @@ only the workspace owner may install, enable, disable, or grant capabilities.
 The backend is authoritative and never trusts the UI.
 """
 
-from flask import current_app, jsonify, render_template, request
+import json
+
+from flask import abort, current_app, jsonify, render_template, request
 from flask_login import current_user, login_required
 
 from app.extensions import db
-from app.models import Plugin, PluginInstallation, Workspace, WorkspaceMember
+from app.models import (
+    Plugin,
+    PluginInstallation,
+    PluginLockEntry,
+    Workspace,
+    WorkspaceMember,
+)
 from app.models.workspace_member import STATUS_ACTIVE
 from app.plugins import bp
 from app.services.capabilities import Capability, CapabilityStore
 from app.services.events import emit_event
-from app.services.permissions import require_workspace_capability, resolve_workspace, role_for
+from app.services.permissions import (
+    can,
+    require_workspace_capability,
+    resolve_workspace,
+    role_for,
+)
 from app.services.plugin_audit import record_plugin_audit
 from app.services.plugin_catalog import (
     CatalogEntryNotFoundError,
@@ -93,8 +106,26 @@ def _serialize(plugin: Plugin, workspace_id: int) -> dict:
     else:
         granted = []
     status = compatibility_status(plugin.compatibility)
+    role = role_for(workspace_id, current_user)
+    can_manage = can("manage_plugins", workspace_id)
+
+    # A catalog install records the artifact digest in the workspace lockfile.
+    # Local-manifest installs have no artifact, so the hash is simply absent
+    # rather than invented.
+    lock_entry = PluginLockEntry.query.filter_by(
+        workspace_id=workspace_id,
+        plugin_id=plugin.id,
+    ).first()
+    artifact_hash = lock_entry.integrity if lock_entry is not None else None
+    source = lock_entry.source if lock_entry is not None else None
+    installed = installation is not None
+    enabled = bool(installed and installation.enabled)
+
     return {
         "id": plugin.id,
+        "workspace_id": workspace_id,
+        "role": role,
+        "can_manage": can_manage,
         "name": plugin.name,
         "version": plugin.version,
         "description": plugin.description,
@@ -108,10 +139,46 @@ def _serialize(plugin: Plugin, workspace_id: int) -> dict:
         "trust_publisher": plugin.trust_publisher,
         "compatible_with_app": bool(status["compatible"]),
         "app_version": status["app_version"],
-        "installed": installation is not None,
-        "enabled": bool(installation is not None and installation.enabled),
+        "installed": installed,
+        "enabled": enabled,
         "granted_capabilities": granted,
+        "artifact_hash": artifact_hash,
+        "artifact_sha256": artifact_hash,
+        "integrity": artifact_hash,
+        "source": source,
+        "can_install": bool(can_manage and not installed),
+        "can_update": bool(can_manage and installed),
+        "can_enable": bool(can_manage and installed and not enabled),
+        "can_disable": bool(can_manage and installed and enabled),
+        "can_uninstall": bool(can_manage and installed),
+        "actions": {
+            "install": bool(can_manage and not installed),
+            "update": bool(can_manage and installed),
+            "enable": bool(can_manage and installed and not enabled),
+            "disable": bool(can_manage and installed and enabled),
+            "uninstall": bool(can_manage and installed),
+        },
     }
+
+
+def _manifest_payload(plugin: Plugin) -> str:
+    """Return an editable manifest JSON document for the update form."""
+    data = {
+        "id": plugin.id,
+        "name": plugin.name,
+        "version": plugin.version,
+        "description": plugin.description or "",
+        "author": plugin.author or "",
+        "entry_point": plugin.entry_point,
+        "capabilities": plugin.capabilities or [],
+        "permissions": plugin.permissions or [],
+        "dependencies": plugin.dependencies or [],
+        "compatibility": plugin.compatibility,
+        "configuration": plugin.configuration or {},
+    }
+    if not data["compatibility"]:
+        data.pop("compatibility")
+    return json.dumps(data, indent=2, sort_keys=True)
 
 
 def _capability_name(value: str) -> str | None:
@@ -162,6 +229,35 @@ def _upsert_plugin(manifest: PluginManifest) -> Plugin:
     return plugin
 
 
+def _record_catalog_lock(
+    plugin: Plugin,
+    workspace_id: int,
+    *,
+    version: str,
+    source: str,
+    integrity: str,
+    dependencies,
+) -> PluginLockEntry:
+    """Persist the catalog artifact digest for the detail page and lockfiles."""
+    row = PluginLockEntry.query.filter_by(
+        workspace_id=workspace_id,
+        plugin_id=plugin.id,
+    ).first()
+    if row is None:
+        row = PluginLockEntry(
+            workspace_id=workspace_id,
+            plugin_id=plugin.id,
+            owner_id=current_user.id,
+        )
+        db.session.add(row)
+    row.version = version
+    row.source = source
+    row.integrity = integrity
+    row.dependencies = list(dependencies or [])
+    db.session.commit()
+    return row
+
+
 def _install_in_workspace(manifest: PluginManifest, workspace_id: int) -> Plugin:
     """Register ``manifest`` and install it in ``workspace_id``.
 
@@ -205,6 +301,29 @@ def index():
     """Plugin management page (workspace-scoped)."""
     workspaces = _accessible_workspaces(current_user)
     return render_template("plugins/index.html", workspaces=workspaces)
+
+
+@bp.route("/workspaces/<int:workspace_id>/plugins/<plugin_id>")
+@bp.route("/workspaces/<int:workspace_id>/<plugin_id>")
+@bp.route("/plugins/<int:workspace_id>/<plugin_id>")
+@login_required
+def detail(workspace_id: int, plugin_id: str):
+    """Render the plugin detail page (#417).
+
+    Any workspace member may view metadata and read-only state. Install,
+    update, and lifecycle controls are rendered only for the workspace owner;
+    the API enforces the same rule independently of the UI.
+    """
+    workspace = resolve_workspace(workspace_id)
+    plugin = Plugin.query.filter_by(id=plugin_id).first()
+    if plugin is None:
+        abort(404)
+    return render_template(
+        "plugins/detail.html",
+        workspace=workspace,
+        plugin=_serialize(plugin, workspace_id),
+        update_manifest=_manifest_payload(plugin),
+    )
 
 
 # --------------------------------------------------------------------------
@@ -458,10 +577,56 @@ def api_install_plugin_from_catalog(workspace_id: int):
     except PluginAlreadyInstalledError:
         return jsonify({"error": "Plugin is already installed in this workspace."}), 409
 
+    _record_catalog_lock(
+        plugin,
+        workspace_id,
+        version=entry.version,
+        source=entry.source,
+        integrity=entry.integrity,
+        dependencies=manifest.dependencies or [],
+    )
     payload = _serialize(plugin, workspace_id)
     payload["source"] = entry.source
     payload["integrity"] = entry.integrity
     return jsonify(payload), 201
+
+
+@bp.route("/api/workspaces/<int:workspace_id>/plugins/<plugin_id>/install", methods=["POST"])
+@login_required
+@require_workspace_capability("manage_plugins")
+def api_install_registered_plugin(workspace_id: int, plugin_id: str):
+    """Install an already-registered plugin into a workspace (owner only).
+
+    The detail page uses this for installs of plugins that are globally
+    registered but not installed here. It records metadata only: no plugin code
+    is loaded or executed and no capability grant is created.
+    """
+    plugin = Plugin.query.filter_by(id=plugin_id).first()
+    if plugin is None:
+        return jsonify({"error": "Plugin not found."}), 404
+    if _installation(plugin_id, workspace_id) is not None:
+        return jsonify({"error": "Plugin is already installed in this workspace."}), 409
+
+    try:
+        enforce_compatible(plugin.compatibility, subject=f"Plugin {plugin.id}")
+    except (IncompatibleCompatibilityError, InvalidCompatibilityError) as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    installation = PluginInstallation(
+        plugin_id=plugin.id,
+        workspace_id=workspace_id,
+        enabled=True,
+        config=plugin.configuration or {},
+        installed_by_id=current_user.id,
+    )
+    db.session.add(installation)
+    try:
+        db.session.commit()
+    except Exception:  # uniqueness races map to a duplicate install
+        db.session.rollback()
+        return jsonify({"error": "Plugin is already installed in this workspace."}), 409
+
+    return jsonify(_serialize(plugin, workspace_id)), 201
 
 
 @bp.route("/api/workspaces/<int:workspace_id>/plugins/<plugin_id>/update", methods=["POST"])

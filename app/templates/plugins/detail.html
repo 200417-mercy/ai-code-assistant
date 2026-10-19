@@ -1,0 +1,150 @@
+{% extends "base.html" %}
+
+{% block title %}{{ plugin.name }} - Plugins - {{ config.APP_NAME }}{% endblock %}
+
+{% block content %}
+{% set owner = plugin.can_manage %}
+<div class="github-header">
+  <div>
+    <p class="repo-meta">
+      <a href="{{ url_for('plugins.index') }}">&larr; All plugins</a>
+      &middot; workspace: {{ workspace.name }}
+    </p>
+    <h1>{{ plugin.name }} <span class="activity-meta">v{{ plugin.version }}</span></h1>
+    <p class="repo-meta">{{ plugin.description or "No description." }}</p>
+    <div id="plugin-detail-badges"></div>
+  </div>
+  <div class="repo-toolbar">
+    {% if plugin.installed %}
+      <span class="project-status project-status-{{ 'ready' if plugin.enabled else 'error' }}">
+        {{ 'enabled' if plugin.enabled else 'disabled' }}
+      </span>
+    {% else %}
+      <span class="project-status project-status-pending">not installed</span>
+    {% endif %}
+  </div>
+</div>
+
+<div id="plugin-detail-message" class="flash flash-warning" hidden></div>
+
+<div class="plugin-detail" data-workspace-id="{{ plugin.workspace_id }}" data-plugin-id="{{ plugin.id }}">
+  {% if not owner %}
+    <p class="field-hint" id="plugin-read-only">
+      You have read-only access to this plugin. Only the workspace owner can install,
+      update, enable, disable, or uninstall it.
+    </p>
+  {% endif %}
+
+  <div class="project-list">
+    <h2>Metadata</h2>
+    <dl class="plugin-meta">
+      <dt>Plugin ID</dt><dd><code>{{ plugin.id }}</code></dd>
+      <dt>Version</dt><dd>{{ plugin.version }}</dd>
+      <dt>Author</dt><dd>{{ plugin.author or "unknown" }}</dd>
+      <dt>Entry point</dt><dd><code>{{ plugin.entry_point }}</code></dd>
+      <dt>Trust</dt>
+      <dd>
+        {{ plugin.trust_state or "Unverified" }}
+        {% if plugin.trust_publisher %}(publisher: {{ plugin.trust_publisher }}){% endif %}
+      </dd>
+      <dt>Compatibility</dt>
+      <dd>
+        {{ plugin.compatibility or "any" }}
+        &middot; {{ "compatible" if plugin.compatible_with_app else "incompatible" }}
+        with app {{ plugin.app_version }}
+      </dd>
+      <dt>Dependencies</dt>
+      <dd>
+        {% if plugin.dependencies %}
+          <ul class="plugin-dependencies">
+            {% for dependency in plugin.dependencies %}<li><code>{{ dependency }}</code></li>{% endfor %}
+          </ul>
+        {% else %}
+          <span class="activity-meta">none</span>
+        {% endif %}
+      </dd>
+      <dt>Artifact hash</dt>
+      <dd id="plugin-artifact-hash">
+        {% if plugin.artifact_hash %}
+          <code>{{ plugin.artifact_hash }}</code>
+        {% else %}
+          <span class="activity-meta">No artifact recorded (local manifest install).</span>
+        {% endif %}
+      </dd>
+      <dt>Source</dt>
+      <dd>
+        {% if plugin.source %}<code>{{ plugin.source }}</code>{% else %}
+          <span class="activity-meta">local manifest</span>
+        {% endif %}
+      </dd>
+    </dl>
+  </div>
+
+  <div class="project-list">
+    <h2>Capabilities</h2>
+    <p class="field-hint">Declared by the manifest; grants are always explicit per workspace.</p>
+    <div>
+      <strong>Declared:</strong>
+      {% if plugin.declared_capabilities %}
+        {% for capability in plugin.declared_capabilities %}
+          <span class="cap-chip">{{ capability }}</span>
+        {% endfor %}
+      {% else %}
+        <span class="activity-meta">none</span>
+      {% endif %}
+    </div>
+    <div style="margin-top:8px;">
+      <strong>Granted:</strong>
+      {% if plugin.granted_capabilities %}
+        {% for capability in plugin.granted_capabilities %}
+          <span class="cap-chip">{{ capability }}</span>
+        {% endfor %}
+      {% else %}
+        <span class="activity-meta">none</span>
+      {% endif %}
+    </div>
+  </div>
+
+  {% if owner %}
+  <div class="project-list" id="plugin-controls">
+    <h2>Manage</h2>
+    <div class="plugin-actions">
+      {% if plugin.actions.install %}
+        <button id="plugin-detail-install" class="btn btn-primary" type="button">Install in this workspace</button>
+      {% endif %}
+      {% if plugin.actions.update %}
+        <button id="plugin-detail-update-toggle" class="btn btn-ghost" type="button">Update…</button>
+      {% endif %}
+      {% if plugin.actions.enable %}
+        <button id="plugin-detail-enable" class="btn btn-ghost" type="button">Enable</button>
+      {% endif %}
+      {% if plugin.actions.disable %}
+        <button id="plugin-detail-disable" class="btn btn-ghost" type="button">Disable</button>
+      {% endif %}
+      {% if plugin.actions.uninstall %}
+        <button id="plugin-detail-uninstall" class="btn btn-ghost" type="button">Uninstall</button>
+      {% endif %}
+    </div>
+
+    {% if plugin.actions.update %}
+    <div id="plugin-update-box" class="prompt-editor" hidden style="margin-top:12px;">
+      <h3>Update plugin manifest</h3>
+      <p class="field-hint">The id must match and the entry point cannot change. Compatibility is enforced before anything is written.</p>
+      <textarea id="plugin-update-manifest" class="field-input" rows="10" spellcheck="false">{{ update_manifest }}</textarea>
+      <div class="prompt-editor-actions">
+        <button id="plugin-detail-update-save" class="btn btn-primary" type="button">Save update</button>
+      </div>
+    </div>
+    {% endif %}
+  </div>
+  {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  window.AICA_PLUGIN_DETAIL = {{ plugin|tojson }};
+</script>
+<script src="{{ url_for('static', filename='js/plugin_badges.js') }}"></script>
+<script src="{{ url_for('static', filename='js/plugin_detail.js') }}"></script>
+{% endblock %}

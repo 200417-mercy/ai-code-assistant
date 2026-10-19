@@ -22,8 +22,11 @@ produce an infinite estimate. Negative counts are still rejected.
 
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass
 from typing import Any
+
+from flask import has_app_context
 
 #: Wildcard key understood by :func:`get_model_price`.
 WILDCARD = "*"
@@ -116,43 +119,141 @@ def _normalized_table(table=None) -> dict[tuple[str, str], ModelPrice]:
     }
 
 
+def _workspace_pk(workspace_id):
+    """Return the integer primary key for a workspace id or model instance."""
+    if workspace_id is None:
+        return None
+    return getattr(workspace_id, "id", workspace_id)
+
+
+def _lookup_keys(provider_key: str, model_key: str) -> tuple[tuple[str, str], ...]:
+    """Return the exact-then-wildcard lookup order for a provider/model pair."""
+    return (
+        (provider_key, model_key),
+        (provider_key, WILDCARD),
+        (WILDCARD, model_key),
+        (WILDCARD, WILDCARD),
+    )
+
+
+def _normalized_overrides(workspace_id) -> dict[tuple[str, str], ModelPrice]:
+    """Load a workspace's overrides as normalized :class:`ModelPrice` entries.
+
+    The database is only queried inside an application context. Outside one
+    (for example in pure unit tests of the global table) there are simply no
+    overrides, so the global table remains usable.
+    """
+    workspace_pk = _workspace_pk(workspace_id)
+    if workspace_pk is None or not has_app_context():
+        return {}
+
+    from app.models import WorkspacePriceOverride
+
+    rows = WorkspacePriceOverride.query.filter_by(workspace_id=workspace_pk).all()
+    return {
+        (_normalize(row.provider), _normalize(row.model)): ModelPrice(
+            provider=row.provider,
+            model=row.model,
+            input_per_1k_usd=float(row.input_per_1k_usd),
+            output_per_1k_usd=float(row.output_per_1k_usd),
+            estimated=False,
+        )
+        for row in rows
+    }
+
+
+def workspace_price_table(workspace_id=None, *, table=None) -> dict[tuple[str, str], ModelPrice]:
+    """Return the global price table overlaid with a workspace's overrides.
+
+    Every workspace override replaces the same ``(provider, model)`` key in the
+    global table. Use :func:`get_model_price` for lookups: it additionally
+    guarantees that *any* matching workspace override (including a wildcard)
+    wins over *every* global fallback.
+    """
+    merged = _normalized_table(table)
+    merged.update(_normalized_overrides(workspace_id))
+    return merged
+
+
 def get_model_price(
     provider: str | None,
     model: str | None,
     *,
     table=None,
+    workspace_id=None,
+    workspace=None,
 ) -> ModelPrice | None:
     """Return the price entry for ``provider``/``model``, or ``None``.
 
-    Matching is case-insensitive and ignores surrounding whitespace. An exact
-    provider/model entry always wins over a fallback, then the following
-    wildcard order is tried: ``(provider, "*")``, ``("*", model)`` and finally
-    ``("*", "*")``. Unknown combinations return ``None`` (cost unknown) rather
-    than assuming zero.
+    Matching is case-insensitive and ignores surrounding whitespace. Workspace
+    overrides are checked first when ``workspace_id`` (or a ``workspace``
+    instance) is supplied, in the same exact-then-wildcard order, so an override
+    always takes precedence over a global fallback. The global table is checked
+    next using: exact, ``(provider, "*")``, ``("*", model)`` and ``("*", "*")``.
+    Unknown combinations return ``None`` (cost unknown) rather than assuming
+    zero.
     """
-    normalized = _normalized_table(table)
+    if workspace_id is None and workspace is not None:
+        workspace_id = workspace
+
     provider_key = _normalize(provider)
     model_key = _normalize(model)
-    for key in (
-        (provider_key, model_key),
-        (provider_key, WILDCARD),
-        (WILDCARD, model_key),
-        (WILDCARD, WILDCARD),
-    ):
+    keys = _lookup_keys(provider_key, model_key)
+
+    if _workspace_pk(workspace_id) is not None:
+        overrides = _normalized_overrides(workspace_id)
+        for key in keys:
+            price = overrides.get(key)
+            if price is not None:
+                return price
+
+    normalized = _normalized_table(table)
+    for key in keys:
         price = normalized.get(key)
         if price is not None:
             return price
     return None
 
 
-def list_model_prices(provider: str | None = None, *, table=None) -> list[ModelPrice]:
+def get_workspace_model_price(
+    provider: str | None,
+    model: str | None,
+    *,
+    workspace_id,
+    table=None,
+) -> ModelPrice | None:
+    """Return the effective price for a workspace (override, then global)."""
+    return get_model_price(provider, model, table=table, workspace_id=workspace_id)
+
+
+def merge_price_tables(base=None, overrides=None) -> dict[tuple[str, str], ModelPrice]:
+    """Merge two price tables, with ``overrides`` replacing matching keys.
+
+    ``overrides`` is a mapping keyed by ``(provider, model)`` whose values are
+    :class:`ModelPrice` entries, so callers can combine a workspace table with
+    another source without touching the database.
+    """
+    merged = _normalized_table(base)
+    if overrides:
+        merged.update(_normalized_table(overrides))
+    return merged
+
+
+def list_model_prices(
+    provider: str | None = None,
+    *,
+    table=None,
+    workspace_id=None,
+) -> list[ModelPrice]:
     """Return the price entries, optionally filtered by ``provider``.
 
-    Results are sorted by provider then model so the table (and any API built
-    on it) is stable across runs.
+    Workspace overrides replace matching global keys. Results are sorted by
+    provider then model so the table (and any API built on it) is stable across
+    runs.
     """
     wanted = _normalize(provider)
     normalized = _normalized_table(table)
+    normalized.update(_normalized_overrides(workspace_id))
     entries = [
         price
         for (entry_provider, _), price in normalized.items()
@@ -161,10 +262,13 @@ def list_model_prices(provider: str | None = None, *, table=None) -> list[ModelP
     return sorted(entries, key=lambda price: (price.provider, price.model))
 
 
-def price_table(*, table=None) -> dict[str, list[dict[str, Any]]]:
-    """Return the whole table grouped by provider (JSON-friendly)."""
+def price_table(*, table=None, workspace_id=None) -> dict[str, list[dict[str, Any]]]:
+    """Return the whole table grouped by provider (JSON-friendly).
+
+    Pass ``workspace_id`` to return the effective table for that workspace.
+    """
     grouped: dict[str, list[dict[str, Any]]] = {}
-    for price in list_model_prices(table=table):
+    for price in list_model_prices(table=table, workspace_id=workspace_id):
         grouped.setdefault(price.provider, []).append(price.to_dict())
     return grouped
 
@@ -176,13 +280,16 @@ def estimate_cost_usd(
     prompt_tokens: int = 0,
     completion_tokens: int = 0,
     table=None,
+    workspace_id=None,
+    workspace=None,
 ) -> float | None:
     """Estimate USD cost for a completion, or ``None`` when the price is unknown.
 
     Token counts must be non-negative integers; anything else raises
     :class:`ValueError` so callers cannot silently report a negative cost.
     Each count is clamped to :data:`MAX_TOKEN_COUNT` before the arithmetic so
-    an implausible value cannot overflow the estimate.
+    an implausible value cannot overflow the estimate. When a workspace is
+    supplied, its overrides are used before the global table.
     """
     prompt = int(prompt_tokens)
     completion = int(completion_tokens)
@@ -191,10 +298,193 @@ def estimate_cost_usd(
     prompt = min(prompt, MAX_TOKEN_COUNT)
     completion = min(completion, MAX_TOKEN_COUNT)
 
-    price = get_model_price(provider, model, table=table)
+    price = get_model_price(
+        provider,
+        model,
+        table=table,
+        workspace_id=workspace_id,
+        workspace=workspace,
+    )
     if price is None:
         return None
     return prompt / 1000 * price.input_per_1k_usd + completion / 1000 * price.output_per_1k_usd
+
+
+def estimate_workspace_cost_usd(
+    provider: str | None,
+    model: str | None,
+    *,
+    workspace_id,
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+    table=None,
+) -> float | None:
+    """Estimate cost using a workspace's overrides, falling back to global."""
+    return estimate_cost_usd(
+        provider,
+        model,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        table=table,
+        workspace_id=workspace_id,
+    )
+
+
+class PriceOverrideError(ValueError):
+    """A workspace price override could not be created or removed."""
+
+
+def _workspace_for_overrides(workspace=None, workspace_id=None):
+    """Resolve a workspace model from either a model instance or an id."""
+    from app.extensions import db
+    from app.models import Workspace
+
+    target = workspace if workspace is not None else workspace_id
+    if target is None:
+        raise PriceOverrideError("A workspace is required.")
+    if not hasattr(target, "user_id"):
+        try:
+            target = db.session.get(Workspace, int(target))
+        except (TypeError, ValueError) as exc:
+            raise PriceOverrideError("A valid workspace is required.") from exc
+    if target is None:
+        raise PriceOverrideError("Workspace not found.")
+    return target
+
+
+def _assert_owner(workspace, user) -> None:
+    """Raise ``PermissionError`` when ``user`` is not the workspace owner."""
+    if user is None:
+        return
+    user_id = getattr(user, "id", user)
+    if workspace.user_id != user_id:
+        raise PermissionError("Only the workspace owner may manage price overrides.")
+
+
+def _coerce_rate(value, name: str) -> float:
+    """Validate a non-negative, finite per-1k-token rate."""
+    try:
+        rate = float(value)
+    except (TypeError, ValueError) as exc:
+        raise PriceOverrideError(f"{name} must be numeric.") from exc
+    if not math.isfinite(rate) or rate < 0:
+        raise PriceOverrideError(f"{name} must be a non-negative finite number.")
+    return rate
+
+
+def _normalize_override_key(value, name: str, limit: int) -> str:
+    text = str(value or "").strip()
+    if not text:
+        raise PriceOverrideError(f"{name} is required.")
+    if len(text) > limit:
+        raise PriceOverrideError(f"{name} must be at most {limit} characters.")
+    return text.lower()
+
+
+def _serialize_override(row) -> dict:
+    return row.to_dict() if hasattr(row, "to_dict") else dict(row)
+
+
+def list_workspace_price_overrides(workspace=None, *, workspace_id=None, user=None) -> list:
+    """Return a workspace's overrides, optionally enforcing owner access."""
+    from app.models import WorkspacePriceOverride
+
+    resolved = _workspace_for_overrides(workspace, workspace_id)
+    _assert_owner(resolved, user)
+    return (
+        WorkspacePriceOverride.query.filter_by(workspace_id=resolved.id)
+        .order_by(WorkspacePriceOverride.provider, WorkspacePriceOverride.model)
+        .all()
+    )
+
+
+def set_workspace_price_override(
+    workspace=None,
+    provider=None,
+    model=None,
+    input_per_1k_usd=0.0,
+    output_per_1k_usd=0.0,
+    *,
+    workspace_id=None,
+    user=None,
+    owner_id=None,
+    commit=True,
+):
+    """Create or update one provider/model override for a workspace.
+
+    Only the workspace owner may call this. The rates are USD per 1,000 tokens
+    and must be non-negative finite numbers.
+    """
+    from app.extensions import db
+    from app.models import WorkspacePriceOverride
+
+    resolved = _workspace_for_overrides(workspace, workspace_id)
+    _assert_owner(resolved, user)
+    provider_key = _normalize_override_key(provider, "provider", 50)
+    model_key = _normalize_override_key(model, "model", 100)
+    input_rate = _coerce_rate(input_per_1k_usd, "input_per_1k_usd")
+    output_rate = _coerce_rate(output_per_1k_usd, "output_per_1k_usd")
+
+    row = WorkspacePriceOverride.query.filter_by(
+        workspace_id=resolved.id,
+        provider=provider_key,
+        model=model_key,
+    ).first()
+    if row is None:
+        row = WorkspacePriceOverride(
+            workspace_id=resolved.id,
+            provider=provider_key,
+            model=model_key,
+        )
+        db.session.add(row)
+    row.owner_id = getattr(owner_id, "id", owner_id) or resolved.user_id
+    row.input_per_1k_usd = input_rate
+    row.output_per_1k_usd = output_rate
+    if commit:
+        db.session.commit()
+    else:
+        db.session.flush()
+    return row
+
+
+def delete_workspace_price_override(
+    workspace=None,
+    provider=None,
+    model=None,
+    *,
+    workspace_id=None,
+    user=None,
+    commit=True,
+) -> bool:
+    """Delete a workspace override, returning ``True`` when a row was removed."""
+    from app.extensions import db
+    from app.models import WorkspacePriceOverride
+
+    resolved = _workspace_for_overrides(workspace, workspace_id)
+    _assert_owner(resolved, user)
+    provider_key = _normalize_override_key(provider, "provider", 50)
+    model_key = _normalize_override_key(model, "model", 100)
+    row = WorkspacePriceOverride.query.filter_by(
+        workspace_id=resolved.id,
+        provider=provider_key,
+        model=model_key,
+    ).first()
+    if row is None:
+        return False
+    db.session.delete(row)
+    if commit:
+        db.session.commit()
+    else:
+        db.session.flush()
+    return True
+
+
+#: Readable aliases for callers that describe the operation differently.
+upsert_workspace_price_override = set_workspace_price_override
+remove_workspace_price_override = delete_workspace_price_override
+get_effective_model_price = get_workspace_model_price
+effective_price_table = workspace_price_table
+get_price = get_model_price
 
 
 __all__ = [
@@ -203,8 +493,21 @@ __all__ = [
     "MAX_TOKEN_COUNT",
     "WILDCARD",
     "ModelPrice",
+    "PriceOverrideError",
+    "delete_workspace_price_override",
+    "effective_price_table",
     "estimate_cost_usd",
+    "estimate_workspace_cost_usd",
+    "get_effective_model_price",
     "get_model_price",
+    "get_price",
+    "get_workspace_model_price",
     "list_model_prices",
+    "list_workspace_price_overrides",
+    "merge_price_tables",
     "price_table",
+    "remove_workspace_price_override",
+    "set_workspace_price_override",
+    "upsert_workspace_price_override",
+    "workspace_price_table",
 ]
