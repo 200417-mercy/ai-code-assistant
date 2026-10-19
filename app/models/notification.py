@@ -22,6 +22,7 @@ NOTIF_ROLE_CHANGE = "role_change"
 NOTIF_AI_EVENT = "ai_event"
 NOTIF_SHARE = "share"
 NOTIF_BUDGET_ALERT = "budget_alert"
+NOTIF_PLUGIN_UPDATE = "plugin_update"
 
 # Notification types that are always delivered: users cannot disable security-
 # critical system notifications about their own access.
@@ -33,6 +34,7 @@ NOTIF_TYPES = (
     NOTIF_AI_EVENT,
     NOTIF_SHARE,
     NOTIF_BUDGET_ALERT,
+    NOTIF_PLUGIN_UPDATE,
 )
 
 
