@@ -80,6 +80,44 @@
     </dl>
   </div>
 
+  <div class="project-list" id="plugin-updates">
+    <h2>Updates</h2>
+    <p class="field-hint" id="plugin-current-version">
+      Current version: <strong>v{{ plugin.version }}</strong>
+    </p>
+    {% if update_plan and update_plan.available_update %}
+      {% set available = update_plan.available_update %}
+      <p id="plugin-update-available" class="field-hint">
+        Update available: <strong>v{{ available.version }}</strong>
+        &middot; trust: {{ available.trust_state or "Unverified" }}
+        {% if available.trust_publisher %}(publisher: {{ available.trust_publisher }}){% endif %}
+        &middot; {{ "compatible" if available.compatible else "incompatible" }}
+        with app {{ plugin.app_version }}
+      </p>
+      {% if owner %}
+        <button id="plugin-detail-update-available" class="btn btn-primary" type="button"
+                data-version="{{ available.version }}">Update to v{{ available.version }}</button>
+      {% endif %}
+    {% else %}
+      <p class="activity-meta" id="plugin-update-none">No compatible update available.</p>
+    {% endif %}
+
+    {% if update_plan and update_plan.rollback_version %}
+      {% if owner %}
+        <button id="plugin-detail-rollback" class="btn btn-ghost" type="button"
+                data-version="{{ update_plan.rollback_version }}">Rollback to v{{ update_plan.rollback_version }}</button>
+      {% else %}
+        <p class="field-hint" id="plugin-rollback-target">
+          Rollback target: v{{ update_plan.rollback_version }}
+        </p>
+      {% endif %}
+    {% endif %}
+
+    {% if owner %}
+      <button id="plugin-detail-check-updates" class="btn btn-ghost" type="button">Check for updates</button>
+    {% endif %}
+  </div>
+
   <div class="project-list">
     <h2>Capabilities</h2>
     <p class="field-hint">Declared by the manifest; grants are always explicit per workspace.</p>

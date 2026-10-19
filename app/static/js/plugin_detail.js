@@ -86,6 +86,42 @@
     });
   }
 
+  function updateFromCatalog(version) {
+    if (!version) return;
+    api(basePath() + "/update-from-catalog", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ version: version }),
+    })
+      .then(function () { window.location.reload(); })
+      .catch(function (error) { showMessage(error.message, "error"); });
+  }
+
+  function rollback(version) {
+    var label = version ? "v" + version : "the previous version";
+    if (!window.confirm("Roll back " + PLUGIN.name + " to " + label + "?")) return;
+    api(basePath() + "/rollback", { method: "POST" })
+      .then(function () { window.location.reload(); })
+      .catch(function (error) { showMessage(error.message, "error"); });
+  }
+
+  function checkUpdates() {
+    api(
+      "/plugins/api/workspaces/" + WORKSPACE_ID + "/plugins/check-updates",
+      { method: "POST" }
+    )
+      .then(function (data) {
+        var count = data && typeof data.created === "number" ? data.created : 0;
+        showMessage(
+          count > 0
+            ? count + " update notification(s) sent to the workspace owner."
+            : "No new plugin updates to notify.",
+          "info"
+        );
+      })
+      .catch(function (error) { showMessage(error.message, "error"); });
+  }
+
   function bind(id, handler) {
     var el = document.getElementById(id);
     if (el) el.addEventListener("click", handler);
@@ -100,6 +136,13 @@
     var box = document.getElementById("plugin-update-box");
     if (box) box.hidden = !box.hidden;
   });
+  bind("plugin-detail-update-available", function () {
+    updateFromCatalog(this.dataset.version);
+  });
+  bind("plugin-detail-rollback", function () {
+    rollback(this.dataset.version);
+  });
+  bind("plugin-detail-check-updates", checkUpdates);
 
   var badges = document.getElementById("plugin-detail-badges");
   if (badges && window.AICAPluginBadges && typeof window.AICAPluginBadges.render === "function") {

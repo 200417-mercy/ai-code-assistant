@@ -208,6 +208,84 @@ class PluginLoadError(PluginError):
 #: consistent.
 LIFECYCLE_HOOKS = ("on_enable", "on_disable", "on_uninstall")
 
+#: Entry-point shape: ``package.module:ClassName`` (no extras, no callables).
+_ENTRY_POINT_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_.]*:[a-zA-Z_][a-zA-Z0-9_]*$")
+
+#: Top-level modules a plugin entry point may never target. Loading these would
+#: turn a manifest into arbitrary ambient-code execution rather than a plugin.
+_DENIED_ENTRY_MODULES = frozenset(
+    {
+        "builtins",
+        "code",
+        "codeop",
+        "ctypes",
+        "importlib",
+        "marshal",
+        "multiprocessing",
+        "os",
+        "pathlib",
+        "pickle",
+        "pty",
+        "runpy",
+        "shutil",
+        "signal",
+        "socket",
+        "subprocess",
+        "sys",
+        "threading",
+    }
+)
+
+
+class PluginEntryPointLoader:
+    """Load a plugin class only through its validated manifest (#406).
+
+    The loader is the single controlled interface for importing plugin code:
+
+    * the manifest must already be a validated :class:`PluginManifest`;
+    * ``entry_point`` must match a strict ``module:Class`` shape;
+    * the module's top-level package may not be a denied stdlib/ambient module;
+    * when a registry is supplied, the plugin must be registered there, so an
+      unvalidated or unregistered manifest can never trigger an import;
+    * every import/attribute failure is isolated as :class:`PluginLoadError`.
+    """
+
+    def __init__(self, manifest: "PluginManifest", *, registry: "PluginRegistry | None" = None):
+        if not isinstance(manifest, PluginManifest):
+            raise PluginLoadError("A validated PluginManifest is required to load a plugin")
+        if registry is not None and registry.get(manifest.id) is None:
+            raise PluginLoadError(f"Plugin {manifest.id} is not registered")
+        if not _ENTRY_POINT_RE.match(manifest.entry_point or ""):
+            raise PluginLoadError(
+                f"Invalid entry point for plugin {manifest.id}: {manifest.entry_point!r}"
+            )
+
+        module_path, class_name = manifest.entry_point.split(":", 1)
+        if module_path.split(".")[0] in _DENIED_ENTRY_MODULES:
+            raise PluginLoadError(
+                f"Refusing to load plugin {manifest.id} from denied module {module_path!r}"
+            )
+        self.manifest = manifest
+        self.module_path = module_path
+        self.class_name = class_name
+
+    def load(self) -> ModuleType:
+        """Import the entry-point module and return it, or raise ``PluginLoadError``."""
+        try:
+            module = importlib.import_module(self.module_path)
+        except Exception as exc:  # ImportError, SyntaxError, runtime import errors
+            raise PluginLoadError(
+                f"Cannot import plugin module {self.module_path!r} for {self.manifest.id}: {exc}"
+            ) from exc
+
+        plugin_class = getattr(module, self.class_name, None)
+        if not callable(plugin_class):
+            raise PluginLoadError(
+                f"Class {self.class_name} not found in module {self.module_path} "
+                f"for plugin {self.manifest.id}"
+            )
+        return module
+
 
 @dataclass
 class PluginManifest:
@@ -386,26 +464,23 @@ class Plugin:
         self.enabled = True
         self.loaded_at: datetime | None = None
 
-    def load(self, app_config: dict[str, Any] | None = None) -> None:
-        """Load plugin module dynamically.
+    def load(self, app_config: dict[str, Any] | None = None, *, registry=None) -> None:
+        """Load the plugin module through the controlled entry-point loader.
 
         Args:
-            app_config: Application configuration for context
+            app_config: Application configuration for context (kept for API
+                compatibility; the loader does not need it).
+            registry: Optional registry. When supplied, the plugin must be
+                registered there before its entry point may be imported.
 
         Raises:
-            PluginLoadError: If plugin cannot be loaded
+            PluginLoadError: If the manifest/entry point is invalid, the plugin
+                is not registered, or the import fails.
         """
-        try:
-            module_path, class_name = self.manifest.entry_point.split(":")
-            self.module = importlib.import_module(module_path)
-            if not hasattr(self.module, class_name):
-                raise PluginLoadError(f"Class {class_name} not found in module {module_path}")
-            self.loaded_at = datetime.now(UTC)
-            logger.info(f"Loaded plugin: {self.manifest.id}")
-        except ImportError as e:
-            raise PluginLoadError(f"Cannot import plugin module: {e}") from e
-        except Exception as e:
-            raise PluginLoadError(f"Error loading plugin {self.manifest.id}: {e}") from e
+        loader = PluginEntryPointLoader(self.manifest, registry=registry)
+        self.module = loader.load()
+        self.loaded_at = datetime.now(UTC)
+        logger.info(f"Loaded plugin: {self.manifest.id}")
 
     def unload(self) -> None:
         """Unload plugin safely."""
@@ -508,6 +583,23 @@ class PluginRegistry:
             raise PluginRegistrationError(f"Plugin {plugin.manifest.id} already registered")
         self._plugins[plugin.manifest.id] = plugin
         logger.info(f"Registered plugin: {plugin.manifest.id}")
+
+    def load_plugin(self, plugin_id: str) -> Plugin:
+        """Load a registered plugin through the controlled entry-point loader.
+
+        Only a plugin already present in the registry (and therefore built from
+        a validated manifest) can be loaded; an unknown id never triggers an
+        import.
+
+        Raises:
+            PluginLoadError: If the plugin is not registered or its entry point
+                cannot be imported.
+        """
+        plugin = self._plugins.get(plugin_id)
+        if plugin is None:
+            raise PluginLoadError(f"Plugin {plugin_id} is not registered")
+        plugin.load(registry=self)
+        return plugin
 
     def discover(self, plugin_dir: str | Path) -> list[PluginManifest]:
         """Discover plugins in directory.

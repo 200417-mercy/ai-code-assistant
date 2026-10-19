@@ -36,6 +36,9 @@ TYPE_PREFERENCE_MAP = {
     "role_change": None,
     "ai_event": PREF_AI_EVENTS,
     "share": PREF_SHARES,
+    # Plugin update notifications reuse the app-events preference category
+    # (there is no separate plugins switch); owners can opt out via ai_events.
+    "plugin_update": PREF_AI_EVENTS,
 }
 
 
