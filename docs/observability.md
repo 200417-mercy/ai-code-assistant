@@ -1,7 +1,7 @@
 # Observability design
 
 > **Implementation status:** The ledger, metrics registry, endpoints, settings
-> and module/test paths below are proposed architecture, not implemented
+> and module/test paths below are proposed architecture, have been  implemented  in app/observability/
 > interfaces in this revision. In particular, `LEDGER_MAX_RECORDS` is not an
 > active retention control. For what is stored and accessible today, see
 > [Usage and billing data privacy](usage-privacy.md).

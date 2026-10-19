@@ -19,6 +19,7 @@ LOGIN_FAILURE = "login_failure"
 USER_CREATED = "user_created"
 CONVERSATION_DELETED = "conversation_deleted"
 PROMPT_DELETED = "prompt_deleted"
+PROVIDER_BILLING_IMPORTED = "provider_billing_imported"
 
 
 def record(

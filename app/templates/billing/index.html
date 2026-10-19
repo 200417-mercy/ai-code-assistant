@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+
+{% block title %}Provider Billing - {{ config.APP_NAME }}{% endblock %}
+
+{% block content %}
+<h1>Provider billing reconciliation</h1>
+<p>
+  Import the amount your LLM provider reported for a month (a CSV with
+  <code>provider</code>, <code>period</code> as <code>YYYY-MM</code>, and
+  <code>amount_usd</code> columns). It is compared against the estimate derived
+  from your recorded token usage. Importing never overwrites the estimate.
+</p>
+
+<form action="{{ url_for('billing.import_billing') }}" method="post" enctype="multipart/form-data">
+  <label for="file">Provider billing CSV</label>
+  <input id="file" name="file" type="file" accept=".csv,text/csv" required>
+  <button class="btn" type="submit">Import and reconcile</button>
+</form>
+
+<section aria-labelledby="reconciliation-heading">
+  <h2 id="reconciliation-heading">Reconciliation</h2>
+  <p>
+    Reported total: <strong>${{ '%.6f'|format(report.reported_total_usd) }}</strong> ·
+    Estimated total: <strong>${{ '%.6f'|format(report.estimated_total_usd) }}</strong> ·
+    Variance: <strong>${{ '%.6f'|format(report.variance_usd) }}</strong>
+  </p>
+  {% if report.rows %}
+  <table class="billing-table">
+    <thead>
+      <tr>
+        <th scope="col">Provider</th>
+        <th scope="col">Period</th>
+        <th scope="col">Reported (USD)</th>
+        <th scope="col">Estimated (USD)</th>
+        <th scope="col">Variance (USD)</th>
+        <th scope="col">Variance (%)</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in report.rows %}
+      <tr>
+        <td>{{ row.provider }}</td>
+        <td>{{ row.period }}</td>
+        <td>{{ '%.6f'|format(row.reported_usd) }}</td>
+        <td>{{ '%.6f'|format(row.estimated_usd) }}</td>
+        <td>{{ '%.6f'|format(row.variance_usd) }}</td>
+        <td>
+          {% if row.variance_pct is not none %}{{ '%.4f'|format(row.variance_pct) }}{% else %}n/a{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="sidebar-empty">No provider billing imported yet.</p>
+  {% endif %}
+</section>
+{% endblock %}
