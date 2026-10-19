@@ -270,6 +270,10 @@ class Config:
     RATE_LIMIT_AI_PER_MINUTE = int(os.getenv("RATE_LIMIT_AI_PER_MINUTE", "60"))
     RATE_LIMIT_AI_WINDOW = int(os.getenv("RATE_LIMIT_AI_WINDOW", "60"))
     RATE_LIMIT_AI_ENABLED = True
+    # Usage-ledger retention (#435): rows older than this many days may be
+    # purged with ``flask usage purge``. Rows newer than the window are never
+    # removed, and the window is bounded to at least one day.
+    USAGE_RETENTION_DAYS = int(os.getenv("USAGE_RETENTION_DAYS", "365"))
     # Optional SMTP for invitation email delivery. When unset, invitations are
     # delivered as in-app notifications only and the app never crashes on mail.
     SMTP_HOST = os.getenv("SMTP_HOST", "")
