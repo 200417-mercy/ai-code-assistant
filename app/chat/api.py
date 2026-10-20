@@ -10,6 +10,7 @@ Machine-facing REST surface for the chat feature:
     GET    /api/usage                              per-user token usage summary
     GET    /api/usage/breakdown                    usage and cost by source
     GET    /api/usage/export                       bounded JSON usage export
+    GET    /api/usage/top                          top conversations/projects by cost
 
 All routes require authentication and are owner-scoped. Errors use RFC 7807
 (``application/problem+json``) documents so API clients never receive HTML error
@@ -338,6 +339,19 @@ def usage_breakdown():
     payload["currency"] = get_currency_config()
     payload["cost_is_estimate"] = True
     return jsonify(payload)
+
+
+@bp.route("/usage/top", methods=["GET"])
+@_login_required
+@_rate_limit("usage")
+def usage_top():
+    """Return the current user's most expensive conversations and projects.
+
+    The authenticated user is always the outer scope; an optional ``limit`` is
+    bounded and defaults to ten. Ordering is deterministic: cost, tokens, id.
+    """
+    limit = request.args.get("limit", type=int)
+    return jsonify(usage_ledger.top_entities(user_id=current_user.id, limit=limit or 10))
 
 
 @bp.route("/usage/export", methods=["GET"])
