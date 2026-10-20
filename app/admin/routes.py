@@ -8,11 +8,12 @@ from __future__ import annotations
 
 from functools import wraps
 
-from flask import jsonify, request
+from flask import Response, jsonify, request
 from flask_login import current_user, login_required
 
 from app.admin import bp
 from app.models import AuditLog, User
+from app.services import usage_dashboards
 
 #: Hard cap on page size so an admin cannot force an unbounded scan.
 MAX_PER_PAGE = 200
@@ -78,3 +79,37 @@ def audit():
             "has_prev": pagination.has_prev,
         }
     )
+
+
+@bp.route("/usage")
+@login_required
+@admin_required
+def usage():
+    """Return the org-wide usage and cost dashboard (admin only).
+
+    Aggregates every stored ``UsageRecord`` row in the requested window. This is
+    read-only and never joins conversation content.
+    """
+    try:
+        days = usage_dashboards.normalize_days(request.args.get("days"))
+    except ValueError as exc:
+        return jsonify({"error": str(exc), "kind": "invalid"}), 400
+    return jsonify(usage_dashboards.admin_dashboard(days=days))
+
+
+@bp.route("/usage/export.csv")
+@login_required
+@admin_required
+def usage_export():
+    """Download the org-wide usage ledger as bounded CSV (admin only)."""
+    try:
+        days = usage_dashboards.normalize_days(request.args.get("days"))
+    except ValueError as exc:
+        return jsonify({"error": str(exc), "kind": "invalid"}), 400
+    text, truncated = usage_dashboards.export_csv(days=days)
+    response = Response(text, mimetype="text/csv")
+    response.headers["Content-Disposition"] = 'attachment; filename="usage-org-wide.csv"'
+    response.headers["Cache-Control"] = "no-store"
+    if truncated:
+        response.headers["X-Export-Truncated"] = "true"
+    return response

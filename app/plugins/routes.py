@@ -1135,7 +1135,10 @@ def api_rollback_plugin(workspace_id: int, plugin_id: str):
         workspace_id=workspace_id,
         plugin_id=plugin_id,
     ).first()
-    if lock_entry is None and not current_app.config.get("PLUGIN_CATALOG_FILE"):
+    if lock_entry is None and not (
+        current_app.config.get("PLUGIN_CATALOG_FILE")
+        or current_app.config.get("PLUGIN_MARKETPLACE_URL")
+    ):
         return jsonify({"error": "No lockfile history or catalog is available for rollback."}), 404
 
     try:

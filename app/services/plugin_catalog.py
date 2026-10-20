@@ -39,10 +39,17 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from packaging.version import InvalidVersion, Version
 
 from app.services.plugin_lockfile import LockfileError, normalize_integrity
+from app.services.plugin_network import (
+    HostResolver,
+    PluginNetworkError,
+    PluginNetworkPolicy,
+    guarded_get,
+)
 from app.services.plugin_signatures import validate_signature_metadata
 
 #: Catalog document version understood by this loader.
@@ -319,19 +326,116 @@ def load_catalog_file(path: str | Path) -> PluginCatalog:
 def load_plugin_catalog(config: Mapping[str, Any]) -> PluginCatalog:
     """Load the catalog configured for ``config``.
 
-    ``PLUGIN_CATALOG_FILE`` is empty by default, which deliberately disables
-    remote installation rather than silently reading an unrelated file.
+    ``PLUGIN_CATALOG_FILE`` takes precedence. When it is empty, an optional
+    ``PLUGIN_MARKETPLACE_URL`` is fetched through the bounded plugin transport
+    (#375). With neither configured, remote installation stays disabled rather
+    than silently reading an unrelated file.
 
     Raises:
         CatalogUnavailableError: If no catalog is configured or it cannot be read.
         CatalogError: If the configured catalog is invalid.
     """
     configured = config.get("PLUGIN_CATALOG_FILE")
-    if not configured:
+    if configured:
+        return load_catalog_file(configured)
+    if config.get("PLUGIN_MARKETPLACE_URL"):
+        return load_remote_catalog(config)
+    raise CatalogUnavailableError(
+        "Remote plugin installation is not configured "
+        "(set PLUGIN_CATALOG_FILE or PLUGIN_MARKETPLACE_URL)."
+    )
+
+
+def _parse_remote_catalog_body(body: Any) -> PluginCatalog:
+    """Validate a remote catalog response body."""
+    if isinstance(body, str):
+        raw = body.encode("utf-8")
+    elif isinstance(body, (bytes, bytearray)):
+        raw = bytes(body)
+    else:
+        raise CatalogUnavailableError("Remote plugin catalog response was not readable.")
+
+    if len(raw) > MAX_CATALOG_BYTES:
         raise CatalogUnavailableError(
-            "Remote plugin installation is not configured (set PLUGIN_CATALOG_FILE)."
+            f"Remote plugin catalog response exceeds {MAX_CATALOG_BYTES} bytes."
         )
-    return load_catalog_file(configured)
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise CatalogError("Remote plugin catalog response is not valid UTF-8.") from exc
+    try:
+        document = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise CatalogError(f"Remote plugin catalog is not valid JSON: {exc}") from exc
+    return parse_catalog(document)
+
+
+def load_remote_catalog(
+    config: Mapping[str, Any],
+    *,
+    resolver: HostResolver | None = None,
+    transport: Any = None,
+) -> PluginCatalog:
+    """Fetch and validate ``PLUGIN_MARKETPLACE_URL`` safely (#375).
+
+    The URL is checked **before** any transport is invoked: it must use https,
+    its host must be on ``PLUGIN_NETWORK_ALLOWLIST``, and it must pass the SSRF
+    guard. The request itself goes through
+    :func:`~app.services.plugin_network.guarded_get`, so redirects are refused,
+    the timeout is bounded, and the response is capped at
+    :data:`MAX_CATALOG_BYTES`.
+
+    ``transport`` exists so tests can supply a mocked transport; production
+    callers should leave it as ``None``.
+    """
+    configured = config.get("PLUGIN_MARKETPLACE_URL")
+    if not isinstance(configured, str) or not configured.strip():
+        raise CatalogUnavailableError(
+            "Remote plugin catalog is not configured (set PLUGIN_MARKETPLACE_URL)."
+        )
+    url = configured.strip()
+
+    # Enforce https independently of the operator policy: a remote catalog is
+    # never allowed to downgrade to plaintext, including when the broader plugin
+    # policy has https_only disabled for local development.
+    if urlparse(url).scheme.lower() != "https":
+        raise CatalogUnavailableError("Remote plugin catalog URLs must use https.")
+
+    policy = PluginNetworkPolicy.from_config(config)
+    try:
+        safe_url = policy.check_url(url, resolver=resolver)
+    except PluginNetworkError as exc:
+        raise CatalogUnavailableError(f"Remote plugin catalog refused: {exc}") from exc
+
+    fetch = transport or guarded_get
+    try:
+        response = fetch(
+            safe_url,
+            policy=policy,
+            resolver=resolver,
+            max_bytes=MAX_CATALOG_BYTES,
+        )
+    except PluginNetworkError as exc:
+        raise CatalogUnavailableError(f"Remote plugin catalog refused: {exc}") from exc
+    except Exception as exc:
+        raise CatalogUnavailableError("Remote plugin catalog request failed.") from exc
+
+    status = getattr(response, "status_code", None)
+    if isinstance(status, int) and 300 <= status < 400:
+        raise CatalogUnavailableError("Remote plugin catalog requests must not redirect.")
+    if status != 200:
+        raise CatalogUnavailableError(
+            f"Remote plugin catalog returned an unexpected status: {status!r}."
+        )
+
+    headers = getattr(response, "headers", None) or {}
+    declared = headers.get("Content-Length") if isinstance(headers, Mapping) else None
+    if isinstance(declared, str) and declared.isdigit() and int(declared) > MAX_CATALOG_BYTES:
+        raise CatalogUnavailableError(
+            f"Remote plugin catalog response exceeds {MAX_CATALOG_BYTES} bytes."
+        )
+
+    return _parse_remote_catalog_body(getattr(response, "content", None))
 
 
 __all__ = [
@@ -345,6 +449,7 @@ __all__ = [
     "PluginCatalog",
     "load_catalog_file",
     "load_plugin_catalog",
+    "load_remote_catalog",
     "parse_catalog",
     "parse_catalog_entry",
 ]

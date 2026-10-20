@@ -54,6 +54,25 @@ Metrics are monotonic where appropriate (counters) and are never reset at runtim
 
 All endpoints return `\*404` for unknown paths and `\*500` with a structured error body on failure. The `/metrics` endpoint is intended for scrapers and is not cached.
 
+### Usage and cost dashboards (#368)
+
+The dashboard surface is implemented in `app/services/usage_dashboards.py` and
+aggregates only stored `usage_records` rows (never prompts or message counters):
+
+| Endpoint | Access | Description |
+| -------- | ------ | ----------- |
+| `/billing/usage` | signed-in owner | HTML per-user dashboard; `workspace_id` selects an owned workspace and `days` bounds the window (1-365). |
+| `/billing/api/usage/dashboard` | signed-in owner | JSON totals, breakdowns by source/provider/model, and a daily series. |
+| `/billing/api/usage/dashboard.csv` | signed-in owner | Bounded CSV export of the owner's rows. |
+| `/billing/api/workspaces/<id>/usage` | workspace owner or site admin | Workspace-scoped dashboard; other callers get a uniform `404`. |
+| `/billing/api/workspaces/<id>/usage.csv` | workspace owner or site admin | Workspace-scoped CSV export. |
+| `/admin/usage` | site admin | Org-wide totals, breakdowns, daily series, and per-user rows. |
+| `/admin/usage/export.csv` | site admin | Org-wide bounded CSV export. |
+
+CSV exports stop after 5,000 rows or 2 MiB, whichever comes first, and set
+`X-Export-Truncated: true` when rows were omitted. Empty scopes return zero
+totals with the same shape, so clients render empty states without guessing.
+
 ## Logging
 
 Logs are emitted as structured JSON objects, one per line. Each record includes:
