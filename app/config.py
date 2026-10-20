@@ -310,6 +310,13 @@ class Config:
     # tight per-user limit of its own.
     RATE_LIMIT_EXPORT_MAX = int(os.getenv("RATE_LIMIT_EXPORT_MAX", "10"))
     RATE_LIMIT_EXPORT_WINDOW = int(os.getenv("RATE_LIMIT_EXPORT_WINDOW", "3600"))
+    # Observability (Phase 10, issue #370). ``METRICS_ENABLED=0`` hides the
+    # endpoint entirely (404). When ``METRICS_TOKEN`` is set, scrapers must send
+    # ``Authorization: Bearer <token>``; when it is empty, only an authenticated
+    # site-admin session may read /metrics. The endpoint is always bounded by
+    # the registry's per-metric series cap.
+    METRICS_ENABLED = os.getenv("METRICS_ENABLED", "1") == "1"
+    METRICS_TOKEN = os.getenv("METRICS_TOKEN", "")
     # Per-user rate limit for AI-powered endpoints (#28): project chat,
     # conversation streaming, and the code tools. Applies per authenticated user
     # (not per IP) and can be switched off entirely (the testing config does).
