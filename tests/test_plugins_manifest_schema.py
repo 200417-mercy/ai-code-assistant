@@ -16,13 +16,13 @@ test reflects the published contract rather than a hard-coded copy.
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from app.services.plugins import ManifestValidationError, PluginManifest
+from app.services.schema_validation import schema_errors
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = REPO_ROOT / "plugins" / "plugin.schema.json"
@@ -34,76 +34,9 @@ SCHEMA = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
 # ---------------------------------------------------------------------------
 
 
-def _type_matches(value: Any, expected: str) -> bool:
-    if expected == "object":
-        return isinstance(value, dict)
-    if expected == "array":
-        return isinstance(value, list)
-    if expected == "string":
-        return isinstance(value, str)
-    if expected == "boolean":
-        return isinstance(value, bool)
-    if expected == "null":
-        return value is None
-    if expected == "integer":
-        return isinstance(value, int) and not isinstance(value, bool)
-    if expected == "number":
-        return isinstance(value, (int, float)) and not isinstance(value, bool)
-    return True
-
-
 def _schema_errors(value: Any, schema: dict[str, Any], path: str = "") -> list[str]:
     """Return the schema violations for ``value`` (empty when it satisfies it)."""
-    errors: list[str] = []
-    label = path or "<root>"
-
-    expected_type = schema.get("type")
-    if expected_type is not None:
-        allowed = expected_type if isinstance(expected_type, list) else [expected_type]
-        if not any(_type_matches(value, item) for item in allowed):
-            return [f"{label}: expected type {expected_type}"]
-
-    if "enum" in schema and value not in schema["enum"]:
-        errors.append(f"{label}: {value!r} is not one of {schema['enum']}")
-    if "const" in schema and value != schema["const"]:
-        errors.append(f"{label}: expected const {schema['const']!r}")
-
-    if isinstance(value, str):
-        if len(value) < schema.get("minLength", 0):
-            errors.append(f"{label}: shorter than minLength {schema['minLength']}")
-        if "maxLength" in schema and len(value) > schema["maxLength"]:
-            errors.append(f"{label}: longer than maxLength {schema['maxLength']}")
-        if "pattern" in schema and re.search(schema["pattern"], value) is None:
-            errors.append(f"{label}: does not match pattern {schema['pattern']!r}")
-
-    if isinstance(value, list):
-        if len(value) < schema.get("minItems", 0):
-            errors.append(f"{label}: fewer than minItems {schema['minItems']}")
-        if schema.get("uniqueItems"):
-            serialized = [json.dumps(item, sort_keys=True, default=str) for item in value]
-            if len(set(serialized)) != len(serialized):
-                errors.append(f"{label}: items are not unique")
-        item_schema = schema.get("items")
-        if isinstance(item_schema, dict):
-            for index, item in enumerate(value):
-                errors.extend(_schema_errors(item, item_schema, f"{label}[{index}]"))
-
-    if isinstance(value, dict):
-        for required in schema.get("required", []):
-            if required not in value:
-                errors.append(f"{label}: missing required property {required!r}")
-        properties = schema.get("properties", {})
-        additional = schema.get("additionalProperties", True)
-        for key, item in value.items():
-            child_path = f"{path}.{key}" if path else key
-            if key in properties:
-                errors.extend(_schema_errors(item, properties[key], child_path))
-            elif additional is False:
-                errors.append(f"{child_path}: additional property not allowed")
-            elif isinstance(additional, dict):
-                errors.extend(_schema_errors(item, additional, child_path))
-
-    return errors
+    return schema_errors(value, schema, path)
 
 
 def _schema_accepts(data: Any) -> bool:

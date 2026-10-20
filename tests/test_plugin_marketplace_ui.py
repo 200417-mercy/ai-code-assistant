@@ -24,11 +24,11 @@ class TestPluginManagementPage:
 
         assert response.status_code == 200
         # Lockfile viewer shell. It is populated client-side from the
-        # owner-scoped `/plugins/api/workspaces/<id>/lockfile` endpoint.
+        # member-readable `/plugins/api/workspaces/<id>/lockfile` endpoint.
         assert 'id="plugin-lockfile-section"' in html
         assert 'id="plugin-lockfile"' in html
         assert "Lockfile" in html
-        assert "Configuration secrets are never shown" in html
+        assert "Readable by every member" in html
         # Shared empty/error/timeout renderer and retry affordance.
         assert "js/plugin_marketplace.js" in html
         assert "js/plugins.js" in html

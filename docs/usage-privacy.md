@@ -52,6 +52,7 @@ The registered routes are in [`chat/routes.py`](../app/chat/routes.py) and
 | Surface | Scope and returned data |
 | --- | --- |
 | `GET /api/usage` | Authenticated user's totals across their own conversations. No message bodies. |
+| `GET /api/usage/export` | Authenticated user's bounded, paginated ledger export; metadata and counts only, never prompt/reply text. |
 | `GET /chat/api/usage/daily?days=30` | Authenticated user's daily counters; default 30 days, clamped to 1-365. No message bodies. This is a query window, **not a retention period**. |
 | `GET /api/conversations/<id>` | Owner-only conversation, messages and token totals. |
 | `GET /chat/conversations/<id>` | Owner or an explicitly shared recipient; returns message content, per-message counters and conversation totals. |
@@ -78,18 +79,32 @@ repository does not enforce their expiry.
 
 ## Export
 
-Owners can download `GET /chat/conversations/<id>/export` as JSON. It includes
-conversation metadata and message objects, including `content` and
-`token_usage`; it is **not a metadata-only usage export**. The owner's
-`.../export.md` endpoint exports conversation text and document metadata, not a
-usage ledger. Both use the owner check, even when a recipient can read the
-conversation through sharing.
+Authenticated users can download a bounded, metadata-only JSON export of their
+own usage ledger from `GET /api/usage/export`. The endpoint always scopes rows
+to the current user; optional `workspace_id`, `project_id` and `source` query
+parameters only narrow that scope and can never expose another account's usage.
+`page` is 1-based and `limit` is clamped to 1-500 (default 100), so a request
+can never return an unbounded document.
 
-For counters without message text, authenticated users can save the JSON from
-`/api/usage` or `/chat/api/usage/daily`. There is no separate ledger CSV/JSON
-export, workspace billing export or invoice download implemented. Exported
-files are outside application retention controls; deleting a conversation does
-not remove copies someone already downloaded.
+The export document contains `schema_version`, `exported_at`, the applied
+`filters`, `pagination` (`page`, `limit`, `total`, `pages`, `has_next`,
+`has_prev`), ledger `totals` for the filtered set, `page_totals` for the
+returned page, the display `currency`/`cost_is_estimate` flags, and `records`.
+Each record is serialized with the same stable field names as the rest of the
+ledger API (`UsageRecord.to_dict()`), for example `source`, token counts,
+`tokens_estimated`, `cost_estimate`, `request_id`, `latency_ms`, `status` and
+`created_at`. Prompts and completions are never part of this export because the
+ledger does not store them.
+
+Conversation exports are separate: owners can download
+`GET /chat/conversations/<id>/export` as JSON. It includes conversation metadata
+and message objects, including `content` and `token_usage`; it is **not a
+metadata-only usage export**. The owner's `.../export.md` endpoint exports
+conversation text and document metadata, not a usage ledger. Both use the owner
+check, even when a recipient can read the conversation through sharing.
+
+Exported files are outside application retention controls; deleting a
+conversation does not remove copies someone already downloaded.
 
 ## Deletion and its limits
 

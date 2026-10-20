@@ -8,10 +8,11 @@ without modifying the core application.
 > registry, the capability model, the event system with fail-closed
 > dispatch-time capability enforcement, a workspace-scoped plugin management API
 > + UI, publisher trust (trusted keys, embedded and detached Ed25519
-> signatures), catalog-pinned remote installation, and the plugin lock-entry
-> model are implemented and tested. A browsable marketplace, artifact
-> download/verification, and remote update/rollback are **not** implemented yet
-> — see [Contributing](#contributing).
+> signatures), catalog-pinned remote installation, the plugin lock-entry model,
+> a member-readable marketplace browser (install/update/rollback for owners),
+> transitive catalog dependency validation, and the published marketplace JSON
+> schema are implemented and tested. Artifact download/execution remains out of
+> scope — installs register validated metadata only.
 
 ## Concepts
 
@@ -250,10 +251,14 @@ management operations.
 | `GET`  | `/plugins/api/workspaces` | Workspaces the user can access | any member |
 | `GET`  | `/plugins/api/workspaces/<id>/plugins` | List plugins + installation state | any member |
 | `GET`  | `/plugins/api/workspaces/<id>/plugins/<plugin_id>` | Inspect one plugin | any member |
+| `GET`  | `/plugins/api/workspaces/<id>/catalog` (alias `/marketplace`) | Browse catalog metadata, trust, dependencies and install/update/rollback state | any member |
+| `GET`  | `/plugins/api/workspaces/<id>/lockfile` | Read the resolved lockfile pin set | any member |
 | `GET`  | `/plugins/api/trusted-publishers` | List configured trusted publisher ids (never keys) and the active policy | authenticated |
 | `POST` | `/plugins/api/workspaces/<id>/plugins/install` | Install a trusted/local manifest | owner |
-| `POST` | `/plugins/api/workspaces/<id>/plugins/install-from-catalog` | Install a catalog-pinned plugin (trust policy enforced) | owner |
+| `POST` | `/plugins/api/workspaces/<id>/plugins/install-from-catalog` | Install a catalog-pinned plugin (trust policy + dependency graph enforced) | owner |
 | `POST` | `/plugins/api/workspaces/<id>/plugins/<plugin_id>/update` | Update a registered plugin from a manifest (compatibility-gated) | owner |
+| `POST` | `/plugins/api/workspaces/<id>/plugins/<plugin_id>/update-from-catalog` | Atomically update from a catalog version | owner |
+| `POST` | `/plugins/api/workspaces/<id>/plugins/<plugin_id>/rollback` | Roll back to the lockfile/catalog target | owner |
 | `POST` | `/plugins/api/workspaces/<id>/plugins/<plugin_id>/enable` | Enable the workspace installation | owner |
 | `POST` | `/plugins/api/workspaces/<id>/plugins/<plugin_id>/disable` | Disable the workspace installation | owner |
 | `POST` | `/plugins/api/workspaces/<id>/plugins/<plugin_id>/capabilities` | Explicitly grant/revoke capabilities (`{"grant": [...], "revoke": [...]}`) | owner |
@@ -380,6 +385,19 @@ and `integrity` so the resolved pin is visible. It does **not** download the
 artifact, execute plugin code, or create capability grants, and trust refusals
 are appended to the workspace audit trail.
 
+### Marketplace catalog schema (#373)
+
+[`plugins/marketplace.schema.json`](../plugins/marketplace.schema.json) is a
+Draft-07 schema for marketplace entries (id, name, version, description,
+author, capabilities, permissions, dependencies, compatibility, artifact URL,
+sha256 and publisher key id). It also accepts the installer catalog shape
+(`id`/`version`/`source`/`integrity`/`manifest`), so existing operator fixtures
+continue to validate without changing `parse_catalog`. The reusable helper
+`app.services.marketplace_schema.validate_marketplace_entry` loads the schema
+and returns path-qualified errors via the dependency-free draft-07 subset
+validator in `app/services/schema_validation.py` (shared with the manifest
+schema tests). No new runtime dependency is required.
+
 ### Plugin lock entries (#394)
 
 `PluginLockEntry` (`plugin_lock_entries`) persists the resolved plugin set for
@@ -404,13 +422,45 @@ The Alembic migration for the table is tracked by the Phase 9 lockfile
 migration issue; the model and its serialization are covered by
 `tests/test_plugin_lock_entries.py`.
 
-The workspace plugin page renders this lockfile read-only for the workspace
-owner (#418): each pinned plugin row shows its id, version, source, integrity
-hash, and dependencies. Owners read it from
+The workspace plugin page renders this lockfile read-only for every workspace
+member (#364): each pinned plugin row shows its id, version, source, integrity
+hash, and dependencies. Any member reads it from
 `GET /plugins/api/workspaces/<id>/lockfile`; an empty lockfile renders an
 explicit empty state instead of a blank panel. Configuration values are never
 part of the lockfile payload, and source URLs have embedded credentials
-stripped before rendering, so the viewer cannot expose a secret.
+stripped before rendering, so the viewer cannot expose a secret. Mutating
+plugin routes remain owner-only.
+
+### Marketplace browser (#364)
+
+`GET /plugins/api/workspaces/<id>/catalog` (also available as
+`/marketplace`) is readable by any workspace member and returns catalog entries
+with stable, bounded pagination (`page` >= 1, `limit` clamped to 100,
+deterministic order by plugin id then version). Each entry exposes safe
+metadata only: name/version/description/author, declared capabilities and
+permissions, dependency requirements, compatibility, trust state and publisher,
+artifact source and sha256 integrity, plus per-workspace `installed`,
+`update_available`, `rollback_available` and `actions` fields. `can_manage` and
+every action are true only for owners; the backend independently enforces
+`manage_plugins` on install/update/rollback.
+
+The management page (`app/templates/plugins/index.html` +
+`app/static/js/plugin_catalog.js`) renders this browser with trust and
+compatibility badges, dependency/artifact details, loading, empty, error and
+timeout states (shared with `plugin_marketplace.js`), and owner-only
+install/update/rollback buttons with surfaced errors. Catalog text is escaped
+before rendering.
+
+### Catalog dependency validation (#391)
+
+Before a catalog install writes anything, `CatalogDependencyGraph`
+(`app/services/plugin_deps.py`) walks the target entry's manifest dependencies
+recursively through the catalog. It collapses duplicate edges/nodes, returns a
+deterministic dependency-first order, and reports a full cycle chain such as
+`a -> b -> a`. Non-catalog dependencies are not required to be installed before
+install; the existing enable-time resolver remains authoritative for their
+installed/disabled/version state. Both the API route and the service/CLI path
+(`install_from_catalog`) run this validation.
 
 All marketplace surfaces (plugin list, lockfile, and detail actions) share the
 empty/error/timeout states in `app/static/js/plugin_marketplace.js` (#421).

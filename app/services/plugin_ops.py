@@ -64,6 +64,25 @@ class RemoteInstallError(PluginError):
     """Raised when a catalog install is refused before registration."""
 
 
+def validate_catalog_install(catalog, entry) -> tuple[str, ...]:
+    """Validate a catalog entry's transitive dependencies before writing.
+
+    Catalog entries are walked recursively so a cyclic graph is refused before
+    an install registers metadata. Dependencies that are not catalogued are not
+    required to be installed yet; enable-time resolution remains unchanged.
+
+    Raises:
+        RemoteInstallError: When the catalog graph is cyclic, unparsable, or a
+            catalogued dependency has no satisfying version.
+    """
+    from app.services.plugin_deps import PluginDependencyError, validate_catalog_dependencies
+
+    try:
+        return validate_catalog_dependencies(catalog, entry)
+    except PluginDependencyError as exc:
+        raise RemoteInstallError(f"Cannot install plugin {entry.plugin_id}: {exc.message}") from exc
+
+
 def list_plugins() -> list[Plugin]:
     """Return all registered plugins, ordered by id."""
     return Plugin.query.order_by(Plugin.id).all()
@@ -251,6 +270,11 @@ def install_from_catalog(
     source = config if config is not None else current_app.config
     catalog = load_plugin_catalog(source)
     entry = catalog.get(plugin_id, version)
+
+    # Walk the catalog graph before any trust checks or writes. This catches
+    # cycles across not-yet-installed dependencies without requiring them to be
+    # installed; enable-time resolution still does that separately.
+    validate_catalog_install(catalog, entry)
 
     trusted_publishers = source.get("PLUGIN_TRUSTED_KEYS") or {}
     # Schema validation is trust-policy agnostic; the policy is enforced below
@@ -586,4 +610,5 @@ __all__ = [
     "rollback_from_catalog",
     "set_plugin_enabled",
     "update_plugin",
+    "validate_catalog_install",
 ]

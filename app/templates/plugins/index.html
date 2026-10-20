@@ -34,16 +34,26 @@
     <p id="plugin-install-status" class="field-hint" hidden></p>
   </div>
 
+  <div class="project-list" id="plugin-marketplace-section" hidden>
+    <h2>Marketplace</h2>
+    <p class="field-hint">Browse the operator-controlled catalog. Members can view trust, compatibility, dependencies and artifact integrity; only workspace owners can install, update or roll back.</p>
+    <div id="plugin-catalog-message" class="flash" role="status" hidden></div>
+    <div id="plugin-catalog" aria-live="polite">
+      <p class="empty-note">Select a workspace to browse the marketplace.</p>
+    </div>
+    <div id="plugin-catalog-pagination" class="plugin-catalog-pagination" aria-label="Marketplace pagination"></div>
+  </div>
+
   <div class="project-list">
     <h2>Registered plugins</h2>
     <div id="plugin-list" aria-live="polite">
-      <p class="empty-note">Loading plugins…</p>
+      <p class="empty-note">Loading plugins&hellip;</p>
     </div>
   </div>
 
   <div class="project-list" id="plugin-lockfile-section" hidden>
     <h2>Lockfile</h2>
-    <p class="field-hint">The resolved versions, sources and artifact hashes pinned for this workspace. Configuration secrets are never shown.</p>
+    <p class="field-hint">The resolved versions, sources and artifact hashes pinned for this workspace. Readable by every member; configuration secrets are never shown.</p>
     <div id="plugin-lockfile" aria-live="polite">
       <p class="empty-note">Select a workspace to view its lockfile.</p>
     </div>
@@ -58,5 +68,6 @@
 {% block scripts %}
 <script src="{{ url_for('static', filename='js/plugin_marketplace.js') }}"></script>
 <script src="{{ url_for('static', filename='js/plugin_badges.js') }}"></script>
+<script src="{{ url_for('static', filename='js/plugin_catalog.js') }}"></script>
 <script src="{{ url_for('static', filename='js/plugins.js') }}"></script>
 {% endblock %}
