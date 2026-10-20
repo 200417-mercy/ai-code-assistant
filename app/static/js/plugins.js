@@ -254,8 +254,8 @@
     var container = document.getElementById("plugin-lockfile");
     if (!section || !container) return;
 
-    section.hidden = !IS_OWNER;
-    if (!IS_OWNER || !WORKSPACE_ID) return;
+    section.hidden = false;
+    if (!WORKSPACE_ID) return;
 
     showPanelState(container, "loading", { message: "Loading lockfile…" });
     api("/plugins/api/workspaces/" + WORKSPACE_ID + "/lockfile")
@@ -278,6 +278,19 @@
       });
   }
 
+  function loadCatalog() {
+    if (!window.AICAPluginCatalog || typeof window.AICAPluginCatalog.loadCatalog !== "function") {
+      return;
+    }
+    window.AICAPluginCatalog.loadCatalog(WORKSPACE_ID, {
+      canManage: IS_OWNER,
+      onChanged: function () {
+        loadPlugins();
+        loadLockfile();
+      },
+    });
+  }
+
   function setWorkspace(workspaceId) {
     WORKSPACE_ID = workspaceId;
     var page = document.getElementById("plugin-page");
@@ -287,11 +300,13 @@
     var banner = document.getElementById("plugin-role-banner");
     var status = document.getElementById("plugin-install-status");
     var lockfileSection = document.getElementById("plugin-lockfile-section");
+    var marketplaceSection = document.getElementById("plugin-marketplace-section");
 
     if (!workspaceId) {
       page.hidden = true;
       empty.hidden = false;
       if (lockfileSection) lockfileSection.hidden = true;
+      if (marketplaceSection) marketplaceSection.hidden = true;
       return;
     }
 
@@ -306,12 +321,14 @@
       message.hidden = true;
       loadPlugins();
       loadLockfile();
+      loadCatalog();
     }).catch(function (error) {
       page.hidden = false;
       empty.hidden = true;
       IS_OWNER = false;
       installBox.hidden = true;
       if (lockfileSection) lockfileSection.hidden = true;
+      if (marketplaceSection) marketplaceSection.hidden = true;
       showPanelError(document.getElementById("plugin-list"), error, {
         title: "Could not open this workspace",
         message:

@@ -1,7 +1,7 @@
 """add monthly user and workspace budgets
 
 Revision ID: b7c8d9e0f1a2
-Revises: f0a1b2c3d4e5
+Revises: b7d8e9f0a1c2
 Create Date: 2026-10-20
 """
 
@@ -9,7 +9,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "b7c8d9e0f1a2"
-down_revision = "f0a1b2c3d4e5"
+down_revision = "b7d8e9f0a1c2"
 branch_labels = None
 depends_on = None
 

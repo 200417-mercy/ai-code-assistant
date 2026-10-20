@@ -22,6 +22,7 @@ PROMPT_DELETED = "prompt_deleted"
 PROVIDER_BILLING_IMPORTED = "provider_billing_imported"
 BUDGET_UPDATED = "budget_updated"
 BUDGET_DELETED = "budget_deleted"
+BUDGET_OVERRIDE_CREATED = "budget_override_created"
 
 
 def record(
