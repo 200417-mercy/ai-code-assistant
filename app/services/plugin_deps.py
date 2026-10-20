@@ -13,7 +13,8 @@ plugin is enabled, that every declared dependency is currently satisfiable:
 
 Resolution is recursive (a plugin's dependency graph is walked before the plugin
 is considered safe to enable) and detects cycles with an on-path visiting set,
-so a cyclic graph fails fast instead of recursing forever.
+so a cyclic graph fails fast instead of recursing forever. ``resolve_order``
+returns the same graph as a deterministic dependency-first install order.
 
 It only *verifies* availability; it never installs packages or modifies ``pip``
 environments. The distinction between plugin and package dependencies is
@@ -190,6 +191,51 @@ class DependencyResolver:
                 f"installed version {installed}.",
             )
         logger.debug("Plugin dependencies resolved for %s", plugin.id)
+
+    def resolve_order(self, plugin: PluginRef) -> tuple[str, ...]:
+        """Return a deterministic dependency-first install order.
+
+        The graph is validated exactly like :meth:`resolve`; a missing,
+        disabled, version-incompatible, or cyclic dependency raises the same
+        errors before any order is returned. Registered plugin dependencies are
+        sorted by canonical id at each level, so the result is stable regardless
+        of the order requirements were declared in. Python packages are not
+        included: only plugin ids are installable through this ordering. The
+        requested plugin is always last.
+        """
+        self.resolve(plugin)
+        order: list[str] = []
+        self._collect_install_order(plugin, set(), order)
+        return tuple(order)
+
+    def _collect_install_order(
+        self,
+        plugin: PluginRef,
+        visited: set[str],
+        order: list[str],
+    ) -> None:
+        """Post-order walk that emits dependencies before their dependents."""
+        if plugin.id in visited:
+            return
+        visited.add(plugin.id)
+
+        dependencies: list[PluginRef] = []
+        for raw in plugin.dependencies:
+            try:
+                requirement = Requirement(raw.strip())
+            except InvalidRequirement:
+                # resolve() has already rejected this graph, so this branch is
+                # unreachable for callers that came through resolve_order().
+                continue
+            if requirement.marker is not None and not requirement.marker.evaluate():
+                continue
+            dependency = self._plugin_provider(requirement.name)
+            if dependency is not None:
+                dependencies.append(dependency)
+
+        for dependency in sorted(dependencies, key=lambda item: canonicalize_name(item.id)):
+            self._collect_install_order(dependency, visited, order)
+        order.append(plugin.id)
 
     # ---------------- internals ----------------
 

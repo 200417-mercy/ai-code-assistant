@@ -386,3 +386,75 @@ class TestRegistryEnableGuard:
         assert "version conflict" in str(excinfo.value)
         assert "plugin-a -> plugin-b" in str(excinfo.value)
         assert plugin_a.enabled is False
+
+
+class TestInstallOrder:
+    def test_dependencies_come_before_dependents(self):
+        plugins = {
+            "plugin-a": _ref("plugin-a", dependencies=["plugin-b"]),
+            "plugin-b": _ref("plugin-b", dependencies=["plugin-c"]),
+            "plugin-c": _ref("plugin-c"),
+        }
+
+        assert _resolver(plugins).resolve_order(plugins["plugin-a"]) == (
+            "plugin-c",
+            "plugin-b",
+            "plugin-a",
+        )
+
+    def test_order_is_deterministic_for_diamond_graphs(self):
+        plugins = {
+            "plugin-a": _ref("plugin-a", dependencies=["plugin-c", "plugin-b"]),
+            "plugin-b": _ref("plugin-b", dependencies=["plugin-d"]),
+            "plugin-c": _ref("plugin-c", dependencies=["plugin-d"]),
+            "plugin-d": _ref("plugin-d"),
+        }
+
+        order = _resolver(plugins).resolve_order(plugins["plugin-a"])
+
+        assert order == ("plugin-d", "plugin-b", "plugin-c", "plugin-a")
+
+    def test_declared_dependency_order_does_not_change_the_install_order(self):
+        plugins_one = {
+            "plugin-a": _ref("plugin-a", dependencies=["plugin-z", "plugin-b"]),
+            "plugin-b": _ref("plugin-b"),
+            "plugin-z": _ref("plugin-z"),
+        }
+        plugins_two = {
+            "plugin-a": _ref("plugin-a", dependencies=["plugin-b", "plugin-z"]),
+            "plugin-b": _ref("plugin-b"),
+            "plugin-z": _ref("plugin-z"),
+        }
+
+        assert _resolver(plugins_one).resolve_order(plugins_one["plugin-a"]) == (
+            "plugin-b",
+            "plugin-z",
+            "plugin-a",
+        )
+        assert _resolver(plugins_two).resolve_order(plugins_two["plugin-a"]) == (
+            "plugin-b",
+            "plugin-z",
+            "plugin-a",
+        )
+
+    def test_refuses_a_cycle_before_returning_an_order(self):
+        plugins = {
+            "plugin-a": _ref("plugin-a", dependencies=["plugin-b"]),
+            "plugin-b": _ref("plugin-b", dependencies=["plugin-a"]),
+        }
+
+        with pytest.raises(PluginDependencyCycleError):
+            _resolver(plugins).resolve_order(plugins["plugin-a"])
+
+    def test_refuses_a_missing_dependency(self):
+        plugins = {"plugin-a": _ref("plugin-a", dependencies=["plugin-missing"])}
+
+        with pytest.raises(PluginDependencyNotFoundError):
+            _resolver(plugins).resolve_order(plugins["plugin-a"])
+
+    def test_python_packages_are_not_part_of_the_plugin_order(self):
+        plugins = {"plugin-a": _ref("plugin-a", dependencies=["requests>=2.31"])}
+
+        assert _resolver(plugins, installed={"requests": "2.31.0"}).resolve_order(
+            plugins["plugin-a"]
+        ) == ("plugin-a",)
