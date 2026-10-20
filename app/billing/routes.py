@@ -13,10 +13,8 @@ from flask_login import current_user, login_required
 
 from app.billing import bp
 from app.extensions import db
-from app.models import Workspace
-from app.models.budget import BUDGET_PERIODS
-from app.services import audit, billing_reconciliation, usage_dashboards
-from app.services import budgets as budget_service
+from app.models import Budget, Workspace
+from app.services import audit, billing_reconciliation, budgets, permissions, usage_dashboards
 from app.services.billing_reconciliation import BillingImportError
 from app.services.budget_access import can_access_workspace_billing
 
@@ -55,7 +53,18 @@ def _extract_csv() -> tuple[str | None, str | None]:
 def index():
     """Render the reconciliation page for the signed-in user."""
     report = billing_reconciliation.reconciliation_report(user_id=current_user.id)
-    return render_template("billing/index.html", report=report)
+    owned_workspaces = (
+        Workspace.query.filter_by(user_id=current_user.id).order_by(Workspace.name).all()
+    )
+    budget_rows = budgets.statuses_for_user(
+        current_user, [workspace.id for workspace in owned_workspaces]
+    )
+    return render_template(
+        "billing/index.html",
+        report=report,
+        budgets=budget_rows,
+        workspaces=owned_workspaces,
+    )
 
 
 @bp.route("/import", methods=["POST"])
@@ -114,88 +123,119 @@ def api_reconciliation():
     return jsonify(report)
 
 
-# ---------------------------------------------------------------------------
-# Budget CRUD API (#461) with owner/admin authorization (#468)
-# ---------------------------------------------------------------------------
+def _json_payload() -> dict:
+    payload = request.get_json(silent=True)
+    if isinstance(payload, dict):
+        return payload
+    return request.form.to_dict()
 
 
-def _budget_not_found() -> tuple:
-    """Uniform refusal for missing and inaccessible budgets (no oracle)."""
-    return jsonify({"error": "Budget not found.", "kind": "not_found"}), 404
+def _authorized_workspace(workspace_id: int):
+    """Resolve a workspace for an owner who may manage its budget, or abort 404."""
+    return permissions.resolve_workspace(workspace_id, current_user)
 
 
-def _budget_invalid(message: str) -> tuple:
-    return jsonify({"error": message, "kind": "invalid"}), 400
+def _budget_status(budget: Budget) -> dict:
+    return budgets.evaluate_budget(budget).to_dict()
 
 
 @bp.route("/api/budgets", methods=["GET"])
 @login_required
 def api_list_budgets():
-    """List budgets the signed-in user may access."""
-    items = budget_service.list_budgets(current_user)
+    """List the caller's user budget and workspace budgets they can manage."""
+    owned = Workspace.query.filter_by(user_id=current_user.id).order_by(Workspace.name).all()
+    rows = budgets.statuses_for_user(current_user, [workspace.id for workspace in owned])
     return jsonify(
         {
-            "budgets": [budget.to_dict() for budget in items],
-            "periods": list(BUDGET_PERIODS),
+            "budgets": rows,
+            "workspaces": [{"id": workspace.id, "name": workspace.name} for workspace in owned],
         }
     )
 
 
-@bp.route("/api/budgets", methods=["POST"])
+@bp.route("/api/budgets", methods=["PUT", "POST"])
 @login_required
-def api_create_budget():
-    """Create a user budget or, for owners/admins, a workspace budget.
+def api_upsert_budget():
+    """Create or replace a monthly user/workspace budget.
 
-    Body: ``name`` (optional), ``limit_amount`` (required, positive),
-    ``period`` (required), optional ``currency`` (default ``USD``) and optional
-    ``workspace_id`` to create a workspace-scoped budget.
+    A workspace budget is owner-only (``manage_billing``); a user budget is
+    scoped to the caller. Both token and cost limits are optional, but at least
+    one must be provided.
     """
+    payload = _json_payload()
+    scope = (payload.get("scope") or "user").strip().lower()
+
+    if scope == "workspace":
+        try:
+            workspace_id = int(payload.get("workspace_id"))
+        except (TypeError, ValueError):
+            return jsonify({"error": "workspace_id is required.", "kind": "invalid"}), 400
+        workspace = _authorized_workspace(workspace_id)
+        if not permissions.can("manage_billing", workspace.id, current_user):
+            return jsonify({"error": "Forbidden.", "kind": "forbidden"}), 403
+        scope_id = workspace.id
+    elif scope == "user":
+        scope_id = current_user.id
+    else:
+        return jsonify({"error": "scope must be 'user' or 'workspace'.", "kind": "invalid"}), 400
+
     try:
-        budget = budget_service.create_budget(current_user, request.get_json(silent=True) or {})
-    except budget_service.BudgetNotFoundError:
-        return _budget_not_found()
-    except budget_service.BudgetValidationError as exc:
-        db.session.rollback()
-        return _budget_invalid(str(exc))
-    return jsonify(budget.to_dict()), 201
-
-
-@bp.route("/api/budgets/<int:budget_id>", methods=["GET"])
-@login_required
-def api_get_budget(budget_id: int):
-    """Return one accessible budget."""
-    try:
-        budget = budget_service.get_budget(budget_id, current_user)
-    except budget_service.BudgetNotFoundError:
-        return _budget_not_found()
-    return jsonify(budget.to_dict())
-
-
-@bp.route("/api/budgets/<int:budget_id>", methods=["PUT", "PATCH"])
-@login_required
-def api_update_budget(budget_id: int):
-    """Update an accessible budget (scope and owner are immutable)."""
-    try:
-        budget = budget_service.update_budget(
-            budget_id, current_user, request.get_json(silent=True) or {}
+        budget = budgets.upsert_budget(
+            scope=scope,
+            scope_id=scope_id,
+            token_limit=payload.get("token_limit"),
+            cost_limit=payload.get("cost_limit"),
+            warn_threshold=payload.get("warn_threshold"),
+            period=payload.get("period"),
+            actor=current_user,
         )
-    except budget_service.BudgetNotFoundError:
-        return _budget_not_found()
-    except budget_service.BudgetValidationError as exc:
-        db.session.rollback()
-        return _budget_invalid(str(exc))
-    return jsonify(budget.to_dict())
+    except budgets.BudgetValidationError as exc:
+        return jsonify({"error": str(exc), "kind": "invalid"}), 400
+
+    audit.record(
+        audit.BUDGET_UPDATED,
+        user=current_user,
+        target_type="budget",
+        target_id=budget.id,
+        metadata={
+            "scope": budget.scope,
+            "scope_id": budget.scope_id,
+            "token_limit": budget.token_limit,
+            "cost_limit": budget.cost_limit,
+            "warn_threshold": budget.warn_threshold,
+        },
+    )
+    db.session.commit()
+    return jsonify({"budget": _budget_status(budget)}), 200
 
 
 @bp.route("/api/budgets/<int:budget_id>", methods=["DELETE"])
 @login_required
 def api_delete_budget(budget_id: int):
-    """Delete an accessible budget."""
-    try:
-        budget_service.delete_budget(budget_id, current_user)
-    except budget_service.BudgetNotFoundError:
-        return _budget_not_found()
-    return "", 204
+    """Delete a budget the caller owns or may manage."""
+    budget = db.session.get(Budget, budget_id)
+    if budget is None:
+        return jsonify({"error": "Budget not found.", "kind": "not_found"}), 404
+
+    if budget.user_id is not None:
+        if budget.user_id != current_user.id:
+            return jsonify({"error": "Forbidden.", "kind": "forbidden"}), 403
+    else:
+        workspace = _authorized_workspace(budget.workspace_id)
+        if not permissions.can("manage_billing", workspace.id, current_user):
+            return jsonify({"error": "Forbidden.", "kind": "forbidden"}), 403
+
+    metadata = {"scope": budget.scope, "scope_id": budget.scope_id}
+    budgets.delete_budget(budget, commit=False)
+    audit.record(
+        audit.BUDGET_DELETED,
+        user=current_user,
+        target_type="budget",
+        target_id=budget_id,
+        metadata=metadata,
+    )
+    db.session.commit()
+    return jsonify({"ok": True})
 
 
 # ---------------------------------------------------------------------------
@@ -232,7 +272,9 @@ def usage_page():
     if days is None:
         days = usage_dashboards.DEFAULT_WINDOW_DAYS
     workspace_id = request.args.get("workspace_id", type=int)
-    if workspace_id is not None and not can_access_workspace_billing(workspace_id, current_user):
+    if workspace_id is not None and not can_access_workspace_billing(
+        workspace_id, current_user
+    ):
         abort(404)
     payload = usage_dashboards.dashboard(
         user_id=current_user.id, workspace_id=workspace_id, days=days

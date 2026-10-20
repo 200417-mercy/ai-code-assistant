@@ -1,202 +1,645 @@
-"""Budget CRUD and authorization (Phase 10, issues #461 and #468).
+"""Monthly token and cost budgets (Phase 10).
 
-Every operation takes the acting ``user`` and enforces the shared billing access
-rules from :mod:`app.services.budget_access`. Inaccessible ids raise the same
-:class:`BudgetNotFoundError` as missing ids, so callers cannot distinguish the
-two. Validation errors raise :class:`BudgetValidationError`.
+Budgets are configured per user or per workspace and enforced *before* an LLM
+call. Both quota types are optional and independent:
+
+* ``token_limit`` caps total tokens recorded in the monthly usage ledger.
+* ``cost_limit`` caps the estimated cost of those tokens.
+
+A call is refused when either configured limit is reached. When both are
+reached the refusal reports every limit that was hit, so a client can tell
+whether the token quota, the cost quota, or both caused it.
+
+Enforcement is **fail closed**: if a budget cannot be evaluated, the call is
+refused rather than allowed to spend unbounded tokens. Budgets are only a
+gate; the append-only ledger remains the source of truth for usage.
 """
 
 from __future__ import annotations
 
-import math
-import re
+import logging
+import threading
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from functools import wraps
 
-from sqlalchemy import and_, or_
+from flask import current_app, g, jsonify, request
+from flask_login import current_user
+from sqlalchemy import func, or_
 
 from app.extensions import db
-from app.models import Budget, Workspace
-from app.models.budget import BUDGET_PERIODS
-from app.services.budget_access import can_access_budget, can_access_workspace_billing
+from app.models.budget import (
+    DEFAULT_WARN_THRESHOLD,
+    PERIOD_MONTHLY,
+    PERIODS,
+    SCOPE_USER,
+    SCOPE_WORKSPACE,
+    Budget,
+)
+from app.models.project import Project
+from app.models.usage_record import UsageRecord
+from app.services import notifications
 
-#: Largest accepted limit, to keep arithmetic finite and dashboards bounded.
-MAX_LIMIT_AMOUNT = 1_000_000_000_000.0
-MAX_NAME_LENGTH = 200
-_CURRENCY_RE = re.compile(r"^[A-Za-z]{3}$")
+logger = logging.getLogger(__name__)
+
+#: Ledger statuses that represent work that did *not* happen. Denied calls must
+#: not count toward a budget, otherwise a blocked caller would keep increasing
+#: their own spend. Unknown/legacy statuses count conservatively so a budget
+#: cannot be bypassed by omitting the field.
+EXCLUDED_STATUSES = ("denied",)
+
+#: ``(budget_id, period_start, level)`` keys already notified in this process.
+#: Notifications are advisory; the limiter prevents duplicate alerts from the
+#: same worker. Multi-worker deployments may emit at most one per worker.
+_ALERTS: set[tuple[int, str, str]] = set()
+_ALERTS_LOCK = threading.Lock()
 
 
-class BudgetError(ValueError):
-    """A budget payload is invalid."""
+class BudgetCheckError(RuntimeError):
+    """Raised when budgets cannot be evaluated (fail-closed condition)."""
 
 
-class BudgetValidationError(BudgetError):
-    """A field failed validation; safe to return to the caller."""
+class BudgetValidationError(ValueError):
+    """Raised when budget configuration is invalid."""
 
 
-class BudgetNotFoundError(LookupError):
-    """The budget does not exist or the caller may not access it."""
+@dataclass(frozen=True)
+class BudgetStatus:
+    """Usage against one budget."""
 
-    def __init__(self, message: str = "Budget not found."):
-        super().__init__(message)
+    budget: Budget
+    period_start: datetime
+    tokens_used: int
+    cost_used: float
+    token_ratio: float | None
+    cost_ratio: float | None
+    limits_hit: tuple[str, ...]
+    warned: bool
+
+    @property
+    def scope(self) -> str:
+        return self.budget.scope
+
+    @property
+    def scope_id(self) -> int:
+        return self.budget.scope_id
+
+    @property
+    def allowed(self) -> bool:
+        return not self.limits_hit
+
+    def to_dict(self) -> dict:
+        data = self.budget.to_dict()
+        data.update(
+            {
+                "period_start": self.period_start.isoformat(),
+                "tokens_used": self.tokens_used,
+                "cost_used": round(self.cost_used, 6),
+                "token_ratio": (
+                    round(self.token_ratio, 4) if self.token_ratio is not None else None
+                ),
+                "cost_ratio": (round(self.cost_ratio, 4) if self.cost_ratio is not None else None),
+                "limits_hit": list(self.limits_hit),
+                "warned": self.warned,
+                "allowed": self.allowed,
+            }
+        )
+        return data
 
 
-def _coerce_limit(value) -> float:
-    if value is None or isinstance(value, bool):
-        raise BudgetValidationError("limit_amount is required and must be a number.")
+@dataclass(frozen=True)
+class BudgetDecision:
+    """Aggregate decision across every applicable budget."""
+
+    allowed: bool
+    warned: bool
+    limits_hit: tuple[str, ...] = ()
+    statuses: tuple[BudgetStatus, ...] = ()
+    retry_after: int = 0
+    message: str = ""
+    details: dict = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return {
+            "allowed": self.allowed,
+            "warned": self.warned,
+            "limits_hit": list(self.limits_hit),
+            "retry_after": self.retry_after,
+            "message": self.message,
+            "budgets": [status.to_dict() for status in self.statuses],
+        }
+
+
+def period_start(now: datetime | None = None) -> datetime:
+    """Return the first instant of the current UTC month."""
+    now = now or datetime.now(UTC)
+    return now.astimezone(UTC).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+
+def next_period_start(now: datetime | None = None) -> datetime:
+    """Return the first instant of the following UTC month."""
+    start = period_start(now)
+    if start.month == 12:
+        return start.replace(year=start.year + 1, month=1)
+    return start.replace(month=start.month + 1)
+
+
+def seconds_until_next_period(now: datetime | None = None) -> int:
+    now = now or datetime.now(UTC)
+    return max(1, int((next_period_start(now) - now).total_seconds()))
+
+
+def enforcement_enabled() -> bool:
+    """Whether budget enforcement is enabled for this application."""
+    return bool(current_app.config.get("BUDGET_ENFORCEMENT_ENABLED", True))
+
+
+def warn_threshold_default() -> float:
     try:
-        amount = float(value)
+        value = float(current_app.config.get("BUDGET_DEFAULT_WARN_THRESHOLD", 0.8))
+    except (TypeError, ValueError):
+        return DEFAULT_WARN_THRESHOLD
+    return min(max(value, 0.01), 1.0)
+
+
+def budgets_for(user, workspace_id: int | None = None) -> list[Budget]:
+    """Return active monthly budgets applicable to ``user`` and ``workspace``."""
+    budgets: list[Budget] = []
+    authenticated = user is not None and getattr(user, "is_authenticated", False)
+    if authenticated:
+        budget = (
+            Budget.query.filter_by(
+                user_id=user.id, workspace_id=None, period=PERIOD_MONTHLY, is_active=True
+            )
+            .order_by(Budget.updated_at.desc())
+            .first()
+        )
+        if budget is not None:
+            budgets.append(budget)
+    if workspace_id is not None:
+        budget = (
+            Budget.query.filter_by(
+                workspace_id=workspace_id,
+                user_id=None,
+                period=PERIOD_MONTHLY,
+                is_active=True,
+            )
+            .order_by(Budget.updated_at.desc())
+            .first()
+        )
+        if budget is not None:
+            budgets.append(budget)
+    return budgets
+
+
+def usage_totals(budget: Budget, now: datetime | None = None) -> tuple[int, float]:
+    """Return ``(tokens, cost)`` recorded in the budget's current period."""
+    start = period_start(now)
+    end = next_period_start(now)
+    query = db.session.query(
+        func.coalesce(func.sum(UsageRecord.total_tokens), 0),
+        func.coalesce(func.sum(UsageRecord.cost_estimate), 0.0),
+    ).filter(
+        UsageRecord.created_at >= start,
+        UsageRecord.created_at < end,
+        or_(
+            UsageRecord.status.is_(None),
+            ~UsageRecord.status.in_(EXCLUDED_STATUSES),
+        ),
+    )
+    if budget.user_id is not None:
+        query = query.filter(UsageRecord.user_id == budget.user_id)
+    else:
+        query = query.filter(UsageRecord.workspace_id == budget.workspace_id)
+    tokens, cost = query.one()
+    return int(tokens or 0), float(cost or 0.0)
+
+
+def evaluate_budget(budget: Budget, now: datetime | None = None) -> BudgetStatus:
+    """Evaluate one budget against current-period usage."""
+    tokens, cost = usage_totals(budget, now)
+    limits_hit: list[str] = []
+    warned = False
+    threshold = float(budget.warn_threshold or DEFAULT_WARN_THRESHOLD)
+
+    token_ratio = None
+    if budget.token_limit is not None:
+        limit = max(0, int(budget.token_limit))
+        token_ratio = float("inf") if limit == 0 else tokens / limit
+        if tokens >= limit:
+            limits_hit.append("tokens")
+        elif token_ratio >= threshold:
+            warned = True
+
+    cost_ratio = None
+    if budget.cost_limit is not None:
+        limit = max(0.0, float(budget.cost_limit))
+        cost_ratio = float("inf") if limit == 0 else (cost / limit if limit else 0.0)
+        if cost >= limit:
+            limits_hit.append("cost")
+        elif cost_ratio >= threshold:
+            warned = True
+
+    return BudgetStatus(
+        budget=budget,
+        period_start=period_start(now),
+        tokens_used=tokens,
+        cost_used=cost,
+        token_ratio=token_ratio,
+        cost_ratio=cost_ratio,
+        limits_hit=tuple(limits_hit),
+        warned=warned,
+    )
+
+
+def check_budgets(user, workspace_id: int | None = None) -> BudgetDecision:
+    """Evaluate every applicable budget and return the aggregate decision.
+
+    Raises :class:`BudgetCheckError` when evaluation fails so callers can fail
+    closed instead of silently allowing the call.
+    """
+    if not enforcement_enabled():
+        return BudgetDecision(allowed=True, warned=False)
+
+    try:
+        budgets = budgets_for(user, workspace_id)
+        if not budgets:
+            return BudgetDecision(allowed=True, warned=False)
+        statuses = tuple(evaluate_budget(budget) for budget in budgets)
+    except Exception as exc:  # pragma: no cover - defensive fail-closed path
+        logger.exception("budget evaluation failed")
+        raise BudgetCheckError("budget evaluation failed") from exc
+
+    limits: list[str] = []
+    blocked: list[str] = []
+    for status in statuses:
+        for limit in status.limits_hit:
+            if limit not in limits:
+                limits.append(limit)
+        if not status.allowed:
+            blocked.append(f"{status.scope} {status.budget.period}")
+    warned = any(status.warned for status in statuses)
+    allowed = not blocked
+
+    message = ""
+    if not allowed:
+        parts = []
+        for status in statuses:
+            if not status.allowed:
+                parts.append(_status_message(status))
+        message = "Budget exceeded: " + " ".join(parts)
+    elif warned:
+        message = "Approaching a configured budget: " + " ".join(
+            _status_message(status) for status in statuses if status.warned
+        )
+
+    return BudgetDecision(
+        allowed=allowed,
+        warned=warned,
+        limits_hit=tuple(limits),
+        statuses=statuses,
+        retry_after=0 if allowed else seconds_until_next_period(),
+        message=message,
+    )
+
+
+def _status_message(status: BudgetStatus) -> str:
+    scope = f"{status.scope} budget"
+    if status.limits_hit == ("tokens", "cost"):
+        return (
+            f"{scope} hit both its token limit "
+            f"({status.tokens_used}/{status.budget.token_limit}) and cost limit "
+            f"({status.cost_used:.4f}/{status.budget.cost_limit:.4f})."
+        )
+    if status.limits_hit == ("tokens",):
+        return (
+            f"{scope} hit its token limit "
+            f"({status.tokens_used}/{status.budget.token_limit} tokens)."
+        )
+    if status.limits_hit == ("cost",):
+        return (
+            f"{scope} hit its cost limit "
+            f"({status.cost_used:.4f}/{status.budget.cost_limit:.4f})."
+        )
+    return f"{scope} is near its configured limit."
+
+
+def budget_error_response(decision: BudgetDecision):
+    """Build the JSON 429 response used when a budget blocks an LLM call."""
+    response = jsonify(
+        {
+            "error": decision.message or "Budget exceeded.",
+            "kind": "budget_exceeded",
+            "limits_hit": list(decision.limits_hit),
+            "retry_after": decision.retry_after,
+            "budgets": [status.to_dict() for status in decision.statuses],
+        }
+    )
+    response.status_code = 429
+    response.headers["Retry-After"] = str(decision.retry_after)
+    return response
+
+
+def _workspace_id_for_request(kwargs: dict) -> int | None:
+    workspace_id = kwargs.get("workspace_id")
+    if workspace_id is not None:
+        return int(workspace_id)
+    project_id = kwargs.get("project_id")
+    if project_id is not None:
+        project = db.session.get(Project, int(project_id))
+        return project.workspace_id if project is not None else None
+    conversation_id = kwargs.get("conversation_id")
+    if conversation_id is not None:
+        from app.models.conversation import Conversation
+
+        conversation = db.session.get(Conversation, int(conversation_id))
+        return conversation.workspace_id if conversation is not None else None
+    review_id = kwargs.get("review_id")
+    if review_id is not None:
+        from app.models.review import Review
+
+        review = db.session.get(Review, int(review_id))
+        if review is not None and review.project_id is not None:
+            project = db.session.get(Project, review.project_id)
+            return project.workspace_id if project is not None else None
+    data = request.get_json(silent=True) if request.is_json else None
+    if isinstance(data, dict):
+        if data.get("workspace_id") is not None:
+            try:
+                return int(data["workspace_id"])
+            except (TypeError, ValueError):
+                return None
+        if data.get("project_id") is not None:
+            try:
+                project = db.session.get(Project, int(data["project_id"]))
+            except (TypeError, ValueError):
+                return None
+            return project.workspace_id if project is not None else None
+    return None
+
+
+def budget_guard(view):
+    """Decorator enforcing budgets before an LLM-calling view runs.
+
+    The resolved decision is exposed as ``g.budget_decision`` so a view can
+    include the warning in its response. On refusal the request never reaches
+    the provider.
+    """
+
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        if not enforcement_enabled():
+            return view(*args, **kwargs)
+        try:
+            decision = check_budgets(current_user, _workspace_id_for_request(kwargs))
+        except BudgetCheckError:
+            response = jsonify(
+                {
+                    "error": "Budget check unavailable; refusing the request.",
+                    "kind": "budget_check_failed",
+                }
+            )
+            response.status_code = 503
+            return response
+
+        g.budget_decision = decision
+        if decision.warned and decision.allowed:
+            notify_decision(current_user, decision, level="warning")
+        if not decision.allowed:
+            notify_decision(current_user, decision, level="blocked")
+            return budget_error_response(decision)
+        return view(*args, **kwargs)
+
+    return wrapped
+
+
+def notify_decision(user, decision: BudgetDecision, *, level: str) -> list:
+    """Notify affected users once per budget/period/level.
+
+    Runs in the caller's transaction. Duplicate suppression is process-local,
+    matching the existing budget-alert deduplicator.
+    """
+    created = []
+    link = "/billing/"
+    for status in decision.statuses:
+        if level == "blocked" and status.allowed:
+            continue
+        if level == "warning" and not status.warned:
+            continue
+        budget = status.budget
+        key = (budget.id, status.period_start.isoformat(), level)
+        with _ALERTS_LOCK:
+            if key in _ALERTS:
+                continue
+            _ALERTS.add(key)
+
+        recipients = []
+        if budget.user_id is not None:
+            recipients.append(user)
+        else:
+            from app.models.user import User
+            from app.models.workspace import Workspace
+
+            workspace = db.session.get(Workspace, budget.workspace_id)
+            if workspace is not None:
+                recipients.append(db.session.get(User, workspace.user_id))
+            if user is not None:
+                recipients.append(user)
+
+        seen_ids = set()
+        for recipient in recipients:
+            if recipient is None or recipient.id in seen_ids:
+                continue
+            seen_ids.add(recipient.id)
+            notification = notifications.notify(
+                recipient,
+                "budget_alert",
+                workspace=budget.workspace_id,
+                payload={
+                    "level": level,
+                    "scope": status.scope,
+                    "period": budget.period,
+                    "period_start": status.period_start.isoformat(),
+                    "limits_hit": list(status.limits_hit),
+                    "tokens_used": status.tokens_used,
+                    "token_limit": budget.token_limit,
+                    "cost_used": round(status.cost_used, 6),
+                    "cost_limit": budget.cost_limit,
+                    "warn_threshold": budget.warn_threshold,
+                    "message": decision.message,
+                },
+                link=link,
+            )
+            if notification is not None:
+                created.append(notification)
+    return created
+
+
+def after_usage_recorded(record: UsageRecord) -> None:
+    """Evaluate budgets after a ledger row is written and notify on thresholds.
+
+    Called from :func:`app.services.usage_ledger.record_usage` inside the
+    caller's transaction. Failures are logged and never break accounting.
+    """
+    try:
+        from app.models.user import User
+
+        user = db.session.get(User, record.user_id) if record.user_id is not None else None
+        if user is None and record.workspace_id is None:
+            return
+        decision = check_budgets(user, record.workspace_id)
+        if decision.warned or not decision.allowed:
+            notify_decision(
+                user,
+                decision,
+                level="blocked" if not decision.allowed else "warning",
+            )
+    except Exception:  # pragma: no cover - accounting must not fail
+        logger.exception("post-usage budget evaluation failed")
+
+
+# ---------------------------------------------------------------------------
+# Configuration helpers used by the billing API/UI
+# ---------------------------------------------------------------------------
+
+
+def validate_limits(token_limit, cost_limit) -> tuple[int | None, float | None]:
+    """Validate and normalize quota limits. At least one must be set."""
+    normalized_tokens = None
+    normalized_cost = None
+    if token_limit is not None and token_limit != "":
+        try:
+            normalized_tokens = int(token_limit)
+        except (TypeError, ValueError) as exc:
+            raise BudgetValidationError("token_limit must be an integer.") from exc
+        if normalized_tokens < 0:
+            raise BudgetValidationError("token_limit must be zero or greater.")
+    if cost_limit is not None and cost_limit != "":
+        try:
+            normalized_cost = float(cost_limit)
+        except (TypeError, ValueError) as exc:
+            raise BudgetValidationError("cost_limit must be a number.") from exc
+        if normalized_cost < 0:
+            raise BudgetValidationError("cost_limit must be zero or greater.")
+    if normalized_tokens is None and normalized_cost is None:
+        raise BudgetValidationError("Set a token limit, a cost limit, or both.")
+    return normalized_tokens, normalized_cost
+
+
+def validate_threshold(value) -> float:
+    if value is None or value == "":
+        return warn_threshold_default()
+    try:
+        threshold = float(value)
     except (TypeError, ValueError) as exc:
-        raise BudgetValidationError("limit_amount must be a number.") from exc
-    if not math.isfinite(amount):
-        raise BudgetValidationError("limit_amount must be finite.")
-    if amount <= 0:
-        raise BudgetValidationError("limit_amount must be greater than zero.")
-    if amount > MAX_LIMIT_AMOUNT:
-        raise BudgetValidationError("limit_amount is too large.")
-    return amount
+        raise BudgetValidationError("warn_threshold must be a number.") from exc
+    if not 0 < threshold <= 1:
+        raise BudgetValidationError("warn_threshold must be greater than 0 and at most 1.")
+    return threshold
 
 
-def _coerce_name(value) -> str:
-    if value is None:
-        return "Budget"
-    if not isinstance(value, str):
-        raise BudgetValidationError("name must be a string.")
-    name = value.strip()
-    if not name:
-        raise BudgetValidationError("name must not be empty.")
-    if len(name) > MAX_NAME_LENGTH:
-        raise BudgetValidationError(f"name must be at most {MAX_NAME_LENGTH} characters.")
-    return name
-
-
-def _coerce_period(value) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise BudgetValidationError("period is required.")
-    period = value.strip().lower()
-    if period not in BUDGET_PERIODS:
-        raise BudgetValidationError(f"period must be one of: {', '.join(BUDGET_PERIODS)}.")
+def validate_period(period: str | None) -> str:
+    period = (period or PERIOD_MONTHLY).strip().lower()
+    if period not in PERIODS:
+        raise BudgetValidationError("Only monthly budgets are supported.")
     return period
 
 
-def _coerce_currency(value) -> str:
-    if value is None:
-        return "USD"
-    if not isinstance(value, str) or not _CURRENCY_RE.match(value.strip()):
-        raise BudgetValidationError("currency must be a three-letter code.")
-    return value.strip().upper()
+def upsert_budget(
+    *,
+    scope: str,
+    scope_id: int,
+    token_limit=None,
+    cost_limit=None,
+    warn_threshold=None,
+    period=None,
+    actor=None,
+    commit: bool = True,
+) -> Budget:
+    """Create or replace the active budget for a scope and period."""
+    if scope not in (SCOPE_USER, SCOPE_WORKSPACE):
+        raise BudgetValidationError("scope must be 'user' or 'workspace'.")
+    tokens, cost = validate_limits(token_limit, cost_limit)
+    threshold = validate_threshold(warn_threshold)
+    period = validate_period(period)
 
-
-def _coerce_workspace_id(value) -> int:
-    if isinstance(value, bool) or value is None:
-        raise BudgetValidationError("workspace_id must be a positive integer.")
-    try:
-        workspace_id = int(value)
-    except (TypeError, ValueError) as exc:
-        raise BudgetValidationError("workspace_id must be a positive integer.") from exc
-    if workspace_id <= 0:
-        raise BudgetValidationError("workspace_id must be a positive integer.")
-    return workspace_id
-
-
-def create_budget(user, payload: dict) -> Budget:
-    """Create a user or workspace budget for ``user``.
-
-    Creating a workspace budget requires workspace-owner or site-admin access.
-    An inaccessible workspace is reported exactly like a missing one.
-    """
-    if not isinstance(payload, dict):
-        raise BudgetValidationError("A JSON object body is required.")
-
-    workspace_id = None
-    if payload.get("workspace_id") is not None:
-        workspace_id = _coerce_workspace_id(payload.get("workspace_id"))
-        if not can_access_workspace_billing(workspace_id, user):
-            raise BudgetNotFoundError()
-
-    budget = Budget(
-        user_id=user.id,
-        workspace_id=workspace_id,
-        name=_coerce_name(payload.get("name")),
-        limit_amount=_coerce_limit(payload.get("limit_amount")),
-        currency=_coerce_currency(payload.get("currency")),
-        period=_coerce_period(payload.get("period")),
-    )
-    db.session.add(budget)
-    db.session.commit()
-    return budget
-
-
-def get_budget(budget_id: int, user) -> Budget:
-    """Return an accessible budget or raise :class:`BudgetNotFoundError`."""
-    budget = db.session.get(Budget, budget_id)
-    if budget is None or not can_access_budget(budget, user):
-        raise BudgetNotFoundError()
-    return budget
-
-
-def list_budgets(user) -> list[Budget]:
-    """Return the budgets ``user`` may access, in stable creation order.
-
-    User budgets are always restricted to their owner. Workspace budgets are
-    visible to the workspace owner and to site administrators.
-    """
-    own_user_budget = and_(
-        Budget.user_id == user.id,
-        Budget.workspace_id.is_(None),
-    )
-    if bool(getattr(user, "is_admin", False)):
-        accessible = or_(Budget.workspace_id.is_not(None), own_user_budget)
+    query = Budget.query.filter_by(period=period)
+    if scope == SCOPE_USER:
+        query = query.filter_by(user_id=scope_id, workspace_id=None)
     else:
-        owned_workspaces = db.session.query(Workspace.id).filter(Workspace.user_id == user.id)
-        accessible = or_(
-            own_user_budget,
-            Budget.workspace_id.in_(owned_workspaces),
+        query = query.filter_by(workspace_id=scope_id, user_id=None)
+    budget = query.order_by(Budget.updated_at.desc()).first()
+
+    if budget is None:
+        budget = Budget(
+            user_id=scope_id if scope == SCOPE_USER else None,
+            workspace_id=scope_id if scope == SCOPE_WORKSPACE else None,
+            period=period,
+            created_by_id=getattr(actor, "id", None),
         )
-    return Budget.query.filter(accessible).order_by(Budget.created_at, Budget.id).all()
-
-
-def update_budget(budget_id: int, user, payload: dict) -> Budget:
-    """Update an accessible budget.
-
-    The scope (``user_id``/``workspace_id``) is immutable: moving a budget
-    between owners or workspaces is not a supported operation.
-    """
-    if not isinstance(payload, dict):
-        raise BudgetValidationError("A JSON object body is required.")
-    budget = get_budget(budget_id, user)
-
-    if "workspace_id" in payload and payload.get("workspace_id") != budget.workspace_id:
-        raise BudgetValidationError("A budget's scope cannot be changed.")
-    if "user_id" in payload and payload.get("user_id") != budget.user_id:
-        raise BudgetValidationError("A budget's owner cannot be changed.")
-
-    if "name" in payload:
-        budget.name = _coerce_name(payload.get("name"))
-    if "limit_amount" in payload:
-        budget.limit_amount = _coerce_limit(payload.get("limit_amount"))
-    if "currency" in payload:
-        budget.currency = _coerce_currency(payload.get("currency"))
-    if "period" in payload:
-        budget.period = _coerce_period(payload.get("period"))
-
-    db.session.commit()
+        db.session.add(budget)
+    budget.token_limit = tokens
+    budget.cost_limit = cost
+    budget.warn_threshold = threshold
+    budget.is_active = True
+    budget.updated_at = datetime.now(UTC)
+    if commit:
+        db.session.commit()
+    else:
+        db.session.flush()
     return budget
 
 
-def delete_budget(budget_id: int, user) -> None:
-    """Delete an accessible budget, or raise :class:`BudgetNotFoundError`."""
-    budget = get_budget(budget_id, user)
+def delete_budget(budget: Budget, *, commit: bool = True) -> None:
     db.session.delete(budget)
-    db.session.commit()
+    if commit:
+        db.session.commit()
+
+
+def statuses_for_user(user, workspace_ids: list[int] | None = None) -> list[dict]:
+    """Return current status for a user's budget and owned workspace budgets."""
+    rows: list[dict] = []
+    for budget in budgets_for(user, None):
+        rows.append(evaluate_budget(budget).to_dict())
+    for workspace_id in workspace_ids or []:
+        for budget in budgets_for(user, workspace_id):
+            if budget.workspace_id == workspace_id:
+                rows.append(evaluate_budget(budget).to_dict())
+    return rows
+
+
+def reset_alerts() -> None:
+    """Clear process-local alert deduplication (tests and worker restarts)."""
+    with _ALERTS_LOCK:
+        _ALERTS.clear()
+
+
+#: Alias used by the shared test reset fixture.
+reset = reset_alerts
 
 
 __all__ = [
-    "MAX_LIMIT_AMOUNT",
-    "BudgetError",
-    "BudgetNotFoundError",
+    "BudgetCheckError",
+    "BudgetDecision",
+    "BudgetStatus",
     "BudgetValidationError",
-    "create_budget",
+    "after_usage_recorded",
+    "budget_error_response",
+    "budget_guard",
+    "budgets_for",
+    "check_budgets",
     "delete_budget",
-    "get_budget",
-    "list_budgets",
-    "update_budget",
+    "enforcement_enabled",
+    "evaluate_budget",
+    "next_period_start",
+    "notify_decision",
+    "period_start",
+    "reset_alerts",
+    "seconds_until_next_period",
+    "statuses_for_user",
+    "upsert_budget",
+    "usage_totals",
+    "validate_limits",
+    "validate_period",
+    "validate_threshold",
 ]

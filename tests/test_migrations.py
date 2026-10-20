@@ -150,6 +150,37 @@ class TestMigrationHead:
             columns = {col["name"] for col in insp.get_columns("workspace_price_overrides")}
             assert columns == expected
 
+    def test_budgets_table_upgraded(self):
+        expected = {
+            "id",
+            "user_id",
+            "workspace_id",
+            "period",
+            "token_limit",
+            "cost_limit",
+            "warn_threshold",
+            "is_active",
+            "created_by_id",
+            "created_at",
+            "updated_at",
+        }
+        with _migration_db() as db_url, _inspect(db_url) as insp:
+            assert "budgets" in set(insp.get_table_names())
+            columns = {col["name"] for col in insp.get_columns("budgets")}
+            assert columns == expected
+
+    def test_budgets_downgrade_removed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_url = f"sqlite:///{os.path.join(tmp, 'mig_budgets.db')}"
+            up = _run_flask(["db", "upgrade"], {"DATABASE_URL": db_url})
+            assert up.returncode == 0, up.stderr
+            down = _run_flask(
+                ["db", "downgrade", "b7d8e9f0a1c2"], {"DATABASE_URL": db_url}
+            )
+            assert down.returncode == 0, down.stderr
+            with _inspect(db_url) as insp:
+                assert "budgets" not in set(insp.get_table_names())
+
     def test_workspace_price_overrides_downgrade_removed(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_url = f"sqlite:///{os.path.join(tmp, 'mig_overrides.db')}"
@@ -652,33 +683,3 @@ class TestMigrationHead:
             assert down.returncode == 0, down.stderr
             with _inspect(db_url) as insp:
                 assert "provider_billing_records" not in set(insp.get_table_names())
-
-    def test_budgets_table_upgraded(self):
-        expected = {
-            "id",
-            "user_id",
-            "workspace_id",
-            "name",
-            "limit_amount",
-            "currency",
-            "period",
-            "created_at",
-            "updated_at",
-        }
-        with _migration_db() as db_url, _inspect(db_url) as insp:
-            tables = set(insp.get_table_names())
-            assert "budgets" in tables
-            columns = {col["name"] for col in insp.get_columns("budgets")}
-            assert columns == expected
-            indexes = {idx["name"] for idx in insp.get_indexes("budgets")}
-            assert {"ix_budgets_user_id", "ix_budgets_workspace_id"} <= indexes
-
-    def test_budgets_downgrade_removed(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            db_url = f"sqlite:///{os.path.join(tmp, 'mig_budgets.db')}"
-            up = _run_flask(["db", "upgrade"], {"DATABASE_URL": db_url})
-            assert up.returncode == 0, up.stderr
-            down = _run_flask(["db", "downgrade", "b7d8e9f0a1c2"], {"DATABASE_URL": db_url})
-            assert down.returncode == 0, down.stderr
-            with _inspect(db_url) as insp:
-                assert "budgets" not in set(insp.get_table_names())

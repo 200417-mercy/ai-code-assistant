@@ -1,19 +1,13 @@
-"""add budgets
+"""add monthly user and workspace budgets
 
 Revision ID: b7c8d9e0f1a2
-Revises: f0a1b2c3d4e5
-Create Date: 2026-10-20 00:00:00.000000
-
-Phase 10 budgets (#461/#468). A budget is either user-scoped
-(``workspace_id`` null) or workspace-scoped. ``user_id`` records the owner that
-created it; workspace authorization is derived from ``workspaces.user_id`` plus
-site-admin status, so no duplicate role column is stored here.
+Revises: b7d8e9f0a1c2
+Create Date: 2026-10-20
 """
 
 import sqlalchemy as sa
 from alembic import op
 
-# revision identifiers, used by Alembic.
 revision = "b7c8d9e0f1a2"
 down_revision = "b7d8e9f0a1c2"
 branch_labels = None
@@ -23,31 +17,49 @@ depends_on = None
 def upgrade():
     op.create_table(
         "budgets",
-        sa.Column("id", sa.Integer(), primary_key=True),
-        sa.Column(
-            "user_id",
-            sa.Integer(),
-            sa.ForeignKey("users.id", ondelete="CASCADE"),
-            nullable=False,
-        ),
-        sa.Column(
-            "workspace_id",
-            sa.Integer(),
-            sa.ForeignKey("workspaces.id", ondelete="CASCADE"),
-            nullable=True,
-        ),
-        sa.Column("name", sa.String(length=200), nullable=False),
-        sa.Column("limit_amount", sa.Float(), nullable=False),
-        sa.Column("currency", sa.String(length=3), nullable=False),
+        sa.Column("id", sa.Integer(), nullable=False),
+        sa.Column("user_id", sa.Integer(), nullable=True),
+        sa.Column("workspace_id", sa.Integer(), nullable=True),
         sa.Column("period", sa.String(length=20), nullable=False),
+        sa.Column("token_limit", sa.Integer(), nullable=True),
+        sa.Column("cost_limit", sa.Float(), nullable=True),
+        sa.Column("warn_threshold", sa.Float(), nullable=False),
+        sa.Column("is_active", sa.Boolean(), nullable=False),
+        sa.Column("created_by_id", sa.Integer(), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.CheckConstraint(
+            "(user_id IS NOT NULL AND workspace_id IS NULL) OR "
+            "(user_id IS NULL AND workspace_id IS NOT NULL)",
+            name="ck_budgets_exactly_one_scope",
+        ),
+        sa.CheckConstraint(
+            "token_limit IS NOT NULL OR cost_limit IS NOT NULL",
+            name="ck_budgets_has_limit",
+        ),
+        sa.CheckConstraint(
+            "warn_threshold > 0 AND warn_threshold <= 1",
+            name="ck_budgets_warn_threshold",
+        ),
+        sa.ForeignKeyConstraint(["created_by_id"], ["users.id"], ondelete="SET NULL"),
+        sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
+        sa.ForeignKeyConstraint(["workspace_id"], ["workspaces.id"], ondelete="CASCADE"),
+        sa.PrimaryKeyConstraint("id"),
     )
-    op.create_index("ix_budgets_user_id", "budgets", ["user_id"])
-    op.create_index("ix_budgets_workspace_id", "budgets", ["workspace_id"])
+    op.create_index("ix_budgets_user_id", "budgets", ["user_id"], unique=False)
+    op.create_index("ix_budgets_workspace_id", "budgets", ["workspace_id"], unique=False)
+    op.create_index("ix_budgets_is_active", "budgets", ["is_active"], unique=False)
+    op.create_index(
+        "ix_budgets_scope_period",
+        "budgets",
+        ["user_id", "workspace_id", "period"],
+        unique=False,
+    )
 
 
 def downgrade():
+    op.drop_index("ix_budgets_scope_period", table_name="budgets")
+    op.drop_index("ix_budgets_is_active", table_name="budgets")
     op.drop_index("ix_budgets_workspace_id", table_name="budgets")
     op.drop_index("ix_budgets_user_id", table_name="budgets")
     op.drop_table("budgets")

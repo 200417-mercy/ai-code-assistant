@@ -234,7 +234,10 @@ def record_usage(
 
     # Scope objects take precedence over their explicit id counterparts.
     resolved_workspace_id = (
-        _object_id(workspace) or workspace_id or _object_id(project, "workspace_id")
+        _object_id(workspace)
+        or workspace_id
+        or _object_id(project, "workspace_id")
+        or _object_id(conversation, "workspace_id")
     )
     resolved_user_id = _object_id(user) or user_id
     resolved_project_id = _object_id(project) or project_id
@@ -275,6 +278,14 @@ def record_usage(
         status=status,
     )
     db.session.add(record)
+
+    # Budget warnings are evaluated against the ledger itself. The call is
+    # inside the same transaction so a warning notification commits with the
+    # usage row; accounting never fails because of budget evaluation.
+    from app.services import budgets
+
+    budgets.after_usage_recorded(record)
+
     if commit:
         db.session.commit()
     return record

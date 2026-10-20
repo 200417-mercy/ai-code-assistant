@@ -74,7 +74,26 @@ _STELLAR_ISSUE_GUIDANCE = (
 
 
 def _run(prompt: str, *, system: str = _SYSTEM) -> str:
-    """Run a single completion with the configured provider."""
+    """Run a single completion with the configured provider.
+
+    GitHub analysis has no workspace context, so only the caller's user budget
+    applies. A blocked or unverifiable budget returns a labeled message without
+    invoking the provider (fail closed).
+    """
+    from flask import has_app_context
+
+    if has_app_context():
+        from flask_login import current_user
+
+        from app.services import budgets
+
+        try:
+            decision = budgets.check_budgets(current_user)
+        except budgets.BudgetCheckError:
+            return "[analysis unavailable: budget check failed]"
+        if not decision.allowed:
+            return f"[analysis unavailable: {decision.message}]"
+
     try:
         provider = get_provider()
         return provider.complete(

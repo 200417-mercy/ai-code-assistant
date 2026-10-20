@@ -3085,3 +3085,44 @@ a:hover {
   gap: 8px;
   flex-wrap: wrap;
 }
+
+/* Real-time collaboration (issue #50) */
+.realtime-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: center;
+  padding: 0.4rem 0.75rem;
+  border-bottom: 1px solid var(--border-color, #e5e7eb);
+  font-size: 0.8rem;
+  color: var(--text-muted, #6b7280);
+}
+
+.realtime-status::before {
+  content: "";
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
+  margin-right: 0.35rem;
+  border-radius: 50%;
+  background: #9ca3af;
+  vertical-align: middle;
+}
+
+.realtime-status[data-state="online"]::before {
+  background: #22c55e;
+}
+
+.realtime-status[data-state="offline"]::before,
+.realtime-status[data-state="connecting"]::before {
+  background: #f59e0b;
+}
+
+.remote-typing {
+  font-style: italic;
+  color: var(--text-muted, #6b7280);
+}
+
+.chat-message[data-message-id]::after {
+  content: "";
+}

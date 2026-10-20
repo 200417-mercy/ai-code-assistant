@@ -1,262 +1,427 @@
-"""Budget CRUD and authorization tests (#461, #468).
+"""Budget model, quota evaluation, API, and enforcement tests (issues #369/#466)."""
 
-Covers every role: user owner, other user, workspace owner, workspace member,
-non-member, and site administrator. Inaccessible and missing budgets must be
-indistinguishable.
-"""
+from datetime import UTC, datetime, timedelta
+
+import pytest
 
 from app.extensions import db
-from app.models import User, Workspace, WorkspaceMember
-from app.models.workspace_member import ROLE_CONTRIBUTOR, ROLE_VIEWER, STATUS_ACTIVE
-
-BUDGETS_URL = "/billing/api/budgets"
+from app.models import Budget, Conversation, Notification, UsageRecord, Workspace
+from app.services import budgets
 
 
-def _user(username, email, *, is_admin=False):
-    user = User(username=username, email=email, is_admin=is_admin)
-    user.set_password("supersecret123")
-    db.session.add(user)
-    db.session.commit()
-    return user
-
-
-def _workspace(owner, name="Budget workspace"):
-    workspace = Workspace(user_id=owner.id, name=name)
+def _workspace(user, name="Workspace"):
+    workspace = Workspace(user_id=user.id, name=name)
     db.session.add(workspace)
     db.session.commit()
     return workspace
 
 
-def _member(workspace, user, role=ROLE_VIEWER):
-    membership = WorkspaceMember(
-        workspace_id=workspace.id,
-        user_id=user.id,
-        role=role,
-        status=STATUS_ACTIVE,
+def _conversation(user, workspace=None):
+    conversation = Conversation(
+        user_id=user.id, title="Test", workspace_id=workspace.id if workspace else None
     )
-    db.session.add(membership)
+    db.session.add(conversation)
     db.session.commit()
-    return membership
+    return conversation
 
 
-def _create(client, **overrides):
-    payload = {
-        "name": "Monthly API budget",
-        "limit_amount": 100.0,
-        "period": "monthly",
-        "currency": "USD",
-    }
-    payload.update(overrides)
-    return client.post(BUDGETS_URL, json=payload)
+def _usage(user, *, tokens=0, cost=0.0, workspace=None, status="success", created_at=None):
+    record = UsageRecord(
+        user_id=user.id,
+        workspace_id=workspace.id if workspace else None,
+        source="chat",
+        total_tokens=tokens,
+        cost_estimate=cost,
+        status=status,
+        created_at=created_at or datetime.now(UTC),
+    )
+    db.session.add(record)
+    db.session.commit()
+    return record
 
 
-def _error(response):
-    return response.get_json()["error"]
+def _token_budget(user, limit, *, threshold=0.8):
+    return budgets.upsert_budget(
+        scope="user",
+        scope_id=user.id,
+        token_limit=limit,
+        warn_threshold=threshold,
+    )
 
 
-class TestBudgetCrud:
-    def test_create_read_update_delete_user_budget(self, client, make_user, login):
-        user = make_user(username="owner", email="owner@example.com")
-        login(email="owner@example.com")
+class TestQuotaEvaluation:
+    def test_period_start_is_first_of_utc_month(self):
+        start = budgets.period_start(datetime(2026, 10, 20, 13, 45, tzinfo=UTC))
+        assert start == datetime(2026, 10, 1, tzinfo=UTC)
+        assert budgets.next_period_start(start) == datetime(2026, 11, 1, tzinfo=UTC)
+        assert budgets.next_period_start(datetime(2026, 12, 5, tzinfo=UTC)) == datetime(
+            2027, 1, 1, tzinfo=UTC
+        )
 
-        created = _create(client)
-        assert created.status_code == 201
-        body = created.get_json()
+    def test_token_quota_warns_then_blocks(self, app, make_user):
+        user = make_user()
+        _token_budget(user, 100, threshold=0.8)
+        _usage(user, tokens=79)
+        status = budgets.evaluate_budget(budgets.budgets_for(user)[0])
+        assert status.allowed
+        assert not status.warned
+
+        _usage(user, tokens=1)
+        status = budgets.evaluate_budget(budgets.budgets_for(user)[0])
+        assert status.allowed
+        assert status.warned
+
+        _usage(user, tokens=20)
+        status = budgets.evaluate_budget(budgets.budgets_for(user)[0])
+        assert not status.allowed
+        assert status.limits_hit == ("tokens",)
+
+    def test_cost_quota_is_independent_of_tokens(self, app, make_user):
+        user = make_user()
+        budgets.upsert_budget(scope="user", scope_id=user.id, cost_limit=1.0, warn_threshold=0.5)
+        _usage(user, tokens=1_000_000, cost=0.49)
+        status = budgets.evaluate_budget(budgets.budgets_for(user)[0])
+        assert status.allowed
+        assert not status.warned
+
+        _usage(user, tokens=0, cost=0.02)
+        status = budgets.evaluate_budget(budgets.budgets_for(user)[0])
+        assert status.allowed
+        assert status.warned
+
+        _usage(user, tokens=0, cost=0.5)
+        status = budgets.evaluate_budget(budgets.budgets_for(user)[0])
+        assert not status.allowed
+        assert status.limits_hit == ("cost",)
+
+    def test_both_quotas_report_every_limit_hit(self, app, make_user):
+        user = make_user()
+        budgets.upsert_budget(scope="user", scope_id=user.id, token_limit=10, cost_limit=0.10)
+        _usage(user, tokens=10, cost=0.10)
+        status = budgets.evaluate_budget(budgets.budgets_for(user)[0])
+        assert not status.allowed
+        assert status.limits_hit == ("tokens", "cost")
+        decision = budgets.check_budgets(user)
+        assert not decision.allowed
+        assert set(decision.limits_hit) == {"tokens", "cost"}
+        assert "token limit" in decision.message
+        assert "cost limit" in decision.message
+
+    def test_only_token_quota_configured_ignores_cost(self, app, make_user):
+        user = make_user()
+        _token_budget(user, 5)
+        _usage(user, tokens=1, cost=1_000.0)
+        status = budgets.evaluate_budget(budgets.budgets_for(user)[0])
+        assert status.allowed
+
+    def test_period_boundary_excludes_previous_month(self, app, make_user):
+        user = make_user()
+        _token_budget(user, 10)
+        start = budgets.period_start()
+        _usage(user, tokens=9, created_at=start - timedelta(seconds=1))
+        status = budgets.evaluate_budget(budgets.budgets_for(user)[0])
+        assert status.tokens_used == 0
+        assert status.allowed
+
+    def test_denied_usage_does_not_count(self, app, make_user):
+        user = make_user()
+        _token_budget(user, 10)
+        _usage(user, tokens=10, status="denied")
+        status = budgets.evaluate_budget(budgets.budgets_for(user)[0])
+        assert status.tokens_used == 0
+        assert status.allowed
+
+    def test_zero_limit_blocks_immediately(self, app, make_user):
+        user = make_user()
+        _token_budget(user, 0)
+        status = budgets.evaluate_budget(budgets.budgets_for(user)[0])
+        assert not status.allowed
+        assert status.limits_hit == ("tokens",)
+
+
+class TestBudgetScopes:
+    def test_workspace_budget_only_applies_with_workspace(self, app, make_user):
+        user = make_user()
+        workspace = _workspace(user)
+        budgets.upsert_budget(scope="workspace", scope_id=workspace.id, token_limit=10)
+        _usage(user, tokens=10, workspace=workspace)
+
+        assert budgets.check_budgets(user).allowed
+        decision = budgets.check_budgets(user, workspace.id)
+        assert not decision.allowed
+        assert decision.statuses[0].scope == "workspace"
+
+    def test_user_and_workspace_budgets_are_both_enforced(self, app, make_user):
+        user = make_user()
+        workspace = _workspace(user)
+        _token_budget(user, 100)
+        budgets.upsert_budget(scope="workspace", scope_id=workspace.id, token_limit=5)
+        _usage(user, tokens=5, workspace=workspace)
+
+        decision = budgets.check_budgets(user, workspace.id)
+        assert not decision.allowed
+        assert {status.scope for status in decision.statuses if not status.allowed} == {"workspace"}
+
+    def test_most_restrictive_budget_blocks(self, app, make_user):
+        user = make_user()
+        workspace = _workspace(user)
+        _token_budget(user, 5)
+        budgets.upsert_budget(scope="workspace", scope_id=workspace.id, cost_limit=1.0)
+        _usage(user, tokens=6, cost=0.1, workspace=workspace)
+
+        decision = budgets.check_budgets(user, workspace.id)
+        assert not decision.allowed
+        assert decision.limits_hit == ("tokens",)
+
+    def test_one_budget_per_scope_is_upserted(self, app, make_user):
+        user = make_user()
+        _token_budget(user, 10)
+        _token_budget(user, 20)
+        assert Budget.query.filter_by(user_id=user.id).count() == 1
+        assert Budget.query.filter_by(user_id=user.id).one().token_limit == 20
+
+
+class TestBudgetApi:
+    def test_user_budget_can_be_configured_and_listed(self, client, make_user, login):
+        make_user()
+        login()
+
+        response = client.put(
+            "/billing/api/budgets",
+            json={"scope": "user", "token_limit": 500, "cost_limit": 2.5},
+        )
+        assert response.status_code == 200, response.get_json()
+        body = response.get_json()["budget"]
         assert body["scope"] == "user"
-        assert body["user_id"] == user.id
-        assert body["workspace_id"] is None
-        assert body["limit_amount"] == 100.0
-        budget_id = body["id"]
+        assert body["token_limit"] == 500
+        assert body["cost_limit"] == 2.5
 
-        listing = client.get(BUDGETS_URL)
-        assert listing.status_code == 200
-        assert [item["id"] for item in listing.get_json()["budgets"]] == [budget_id]
+        listing = client.get("/billing/api/budgets").get_json()
+        assert len(listing["budgets"]) == 1
+        assert listing["budgets"][0]["token_limit"] == 500
 
-        fetched = client.get(f"{BUDGETS_URL}/{budget_id}")
-        assert fetched.status_code == 200
-        assert fetched.get_json()["name"] == "Monthly API budget"
-
-        updated = client.patch(
-            f"{BUDGETS_URL}/{budget_id}",
-            json={"limit_amount": 250.5, "period": "weekly", "name": "Weekly"},
+    def test_both_quota_types_can_be_set(self, client, make_user, login):
+        make_user()
+        login()
+        response = client.put(
+            "/billing/api/budgets",
+            json={"scope": "user", "token_limit": 0, "cost_limit": 0},
         )
-        assert updated.status_code == 200
-        assert updated.get_json()["limit_amount"] == 250.5
-        assert updated.get_json()["period"] == "weekly"
-        assert updated.get_json()["name"] == "Weekly"
+        assert response.status_code == 200
+        body = response.get_json()["budget"]
+        assert body["token_limit"] == 0
+        assert body["cost_limit"] == 0
 
-        deleted = client.delete(f"{BUDGETS_URL}/{budget_id}")
-        assert deleted.status_code == 204
-        assert client.get(f"{BUDGETS_URL}/{budget_id}").status_code == 404
+    def test_requires_at_least_one_limit(self, client, make_user, login):
+        make_user()
+        login()
+        response = client.put("/billing/api/budgets", json={"scope": "user"})
+        assert response.status_code == 400
+        assert "Set a token limit" in response.get_json()["error"]
 
-    def test_create_workspace_budget(self, client, make_user, login):
-        owner = make_user(username="owner", email="owner@example.com")
+    def test_rejects_negative_and_invalid_threshold(self, client, make_user, login):
+        make_user()
+        login()
+        assert (
+            client.put(
+                "/billing/api/budgets",
+                json={"scope": "user", "token_limit": -1},
+            ).status_code
+            == 400
+        )
+        assert (
+            client.put(
+                "/billing/api/budgets",
+                json={"scope": "user", "token_limit": 1, "warn_threshold": 1.5},
+            ).status_code
+            == 400
+        )
+
+    def test_workspace_budget_requires_owner(self, client, make_user, login, db):
+        owner = make_user()
+        other = make_user("other", "other@example.com")
         workspace = _workspace(owner)
-        login(email="owner@example.com")
 
-        response = _create(client, workspace_id=workspace.id, limit_amount=500)
+        login()
+        response = client.put(
+            "/billing/api/budgets",
+            json={"scope": "workspace", "workspace_id": workspace.id, "token_limit": 10},
+        )
+        assert response.status_code == 200
+
+        login("other@example.com")
+        response = client.put(
+            "/billing/api/budgets",
+            json={"scope": "workspace", "workspace_id": workspace.id, "token_limit": 20},
+        )
+        # Non-members get the same 404 as an unknown workspace (no oracle).
+        assert response.status_code == 404
+        assert other.id != owner.id
+
+    def test_workspace_contributor_cannot_configure_budget(self, client, make_user, login, db):
+        owner = make_user()
+        contributor = make_user("contributor", "contributor@example.com")
+        workspace = _workspace(owner)
+        from app.models import WorkspaceMember
+
+        db.session.add(
+            WorkspaceMember(
+                workspace_id=workspace.id,
+                user_id=contributor.id,
+                role="contributor",
+                status="active",
+            )
+        )
+        db.session.commit()
+
+        login("contributor@example.com")
+        response = client.put(
+            "/billing/api/budgets",
+            json={"scope": "workspace", "workspace_id": workspace.id, "token_limit": 20},
+        )
+        assert response.status_code == 403
+
+    def test_delete_requires_matching_scope(self, client, make_user, login):
+        user = make_user()
+        budget = _token_budget(user, 10)
+
+        login()
+        assert client.delete(f"/billing/api/budgets/{budget.id}").status_code == 200
+        assert db.session.get(Budget, budget.id) is None
+
+    def test_delete_rejects_another_users_budget(self, client, make_user, login):
+        owner = make_user()
+        make_user("intruder", "intruder@example.com")
+        budget = _token_budget(owner, 10)
+
+        login("intruder@example.com")
+        assert client.delete(f"/billing/api/budgets/{budget.id}").status_code == 403
+
+
+class TestNotifications:
+    def test_warning_and_block_notifications_are_emitted_once(self, app, make_user):
+        user = make_user()
+        _token_budget(user, 10, threshold=0.5)
+        _usage(user, tokens=5)
+
+        decision = budgets.check_budgets(user)
+        assert decision.warned
+        created = budgets.notify_decision(user, decision, level="warning")
+        db.session.commit()
+        assert len(created) == 1
+        assert created[0].type == "budget_alert"
+
+        # Deduplicated for the same budget/period/level.
+        assert budgets.notify_decision(user, decision, level="warning") == []
+        assert Notification.query.filter_by(type="budget_alert").count() == 1
+
+    def test_usage_recording_triggers_warning_notification(self, app, make_user):
+        from app.services import usage_ledger
+
+        user = make_user()
+        _token_budget(user, 10, threshold=0.5)
+        usage_ledger.record_usage(source="chat", user=user, total_tokens=6)
+
+        assert Notification.query.filter_by(type="budget_alert").count() == 1
+
+    def test_block_notification_mentions_limits(self, app, make_user):
+        user = make_user()
+        _token_budget(user, 1)
+        _usage(user, tokens=1)
+        decision = budgets.check_budgets(user)
+        budgets.notify_decision(user, decision, level="blocked")
+        db.session.commit()
+        notification = Notification.query.filter_by(type="budget_alert").one()
+        assert notification.payload["limits_hit"] == ["tokens"]
+        assert notification.payload["level"] == "blocked"
+
+
+class TestEnforcement:
+    def test_blocked_call_returns_429_with_limit(self, client, make_user, login):
+        user = make_user()
+        conversation = _conversation(user)
+        _token_budget(user, 1)
+        _usage(user, tokens=1)
+        login()
+
+        response = client.post(
+            f"/api/conversations/{conversation.id}/messages",
+            json={"content": "hello"},
+        )
+        assert response.status_code == 429
+        body = response.get_json()
+        assert body["kind"] == "budget_exceeded"
+        assert body["limits_hit"] == ["tokens"]
+        assert response.headers["Retry-After"]
+        assert db.session.get(Conversation, conversation.id).messages == []
+
+    def test_allowed_call_succeeds_and_warns_via_header(self, client, make_user, login):
+        user = make_user()
+        conversation = _conversation(user)
+        _token_budget(user, 1000, threshold=0.01)
+        _usage(user, tokens=10)
+        login()
+
+        response = client.post(
+            f"/api/conversations/{conversation.id}/messages",
+            json={"content": "hello"},
+        )
+        assert response.status_code == 201, response.get_json()
+        assert response.headers.get("X-Budget-Warning") == "approaching_limit"
+
+    def test_disabled_enforcement_allows_call(self, client, make_user, login, app):
+        app.config["BUDGET_ENFORCEMENT_ENABLED"] = False
+        user = make_user()
+        conversation = _conversation(user)
+        _token_budget(user, 1)
+        _usage(user, tokens=100)
+        login()
+
+        response = client.post(
+            f"/api/conversations/{conversation.id}/messages",
+            json={"content": "hello"},
+        )
         assert response.status_code == 201
-        assert response.get_json()["scope"] == "workspace"
-        assert response.get_json()["workspace_id"] == workspace.id
 
-    def test_validation_errors_are_explicit(self, client, make_user, login):
-        make_user(username="owner", email="owner@example.com")
-        login(email="owner@example.com")
+    def test_evaluation_error_fails_closed(self, client, make_user, login, monkeypatch):
+        user = make_user()
+        conversation = _conversation(user)
+        _token_budget(user, 10)
+        login()
 
-        cases = [
-            ({"limit_amount": None}, "limit_amount"),
-            ({"limit_amount": 0}, "greater than zero"),
-            ({"limit_amount": -1}, "greater than zero"),
-            ({"limit_amount": "not-a-number"}, "number"),
-            ({"period": "fortnightly"}, "period"),
-            ({"currency": "US"}, "currency"),
-            ({"name": "   "}, "name"),
-        ]
-        for overrides, expected in cases:
-            response = _create(client, **overrides)
-            assert response.status_code == 400, overrides
-            assert expected in _error(response)
+        def boom(*args, **kwargs):
+            raise RuntimeError("database unavailable")
 
-    def test_scope_and_owner_cannot_be_changed(self, client, make_user, login):
-        user = make_user(username="owner", email="owner@example.com")
-        other = make_user(username="other", email="other@example.com")
-        login(email="owner@example.com")
-        budget_id = _create(client).get_json()["id"]
-
-        response = client.patch(f"{BUDGETS_URL}/{budget_id}", json={"workspace_id": 1})
-        assert response.status_code == 400
-        assert "scope" in _error(response)
-
-        response = client.patch(f"{BUDGETS_URL}/{budget_id}", json={"user_id": other.id})
-        assert response.status_code == 400
-        assert "owner" in _error(response)
-
-        assert user.id != other.id
-
-
-class TestUserBudgetAuthorization:
-    def test_other_user_gets_uniform_404(self, client, make_user, login):
-        owner = make_user(username="owner", email="owner@example.com")
-        make_user(username="other", email="other@example.com")
-        login(email="owner@example.com")
-        budget_id = _create(client).get_json()["id"]
-
-        login(email="other@example.com")
-        for method, url, kwargs in [
-            ("get", f"{BUDGETS_URL}/{budget_id}", {}),
-            ("patch", f"{BUDGETS_URL}/{budget_id}", {"json": {"limit_amount": 1}}),
-            ("delete", f"{BUDGETS_URL}/{budget_id}", {}),
-        ]:
-            response = getattr(client, method)(url, **kwargs)
-            assert response.status_code == 404
-            assert response.get_json() == {
-                "error": "Budget not found.",
-                "kind": "not_found",
-            }
-        assert owner.id
-
-    def test_site_admin_cannot_read_another_users_user_budget(self, client, make_user, login):
-        make_user(username="owner", email="owner@example.com")
-        admin = make_user(username="admin", email="admin@example.com")
-        admin.is_admin = True
-        db.session.commit()
-        login(email="owner@example.com")
-        budget_id = _create(client).get_json()["id"]
-
-        login(email="admin@example.com")
-        assert client.get(f"{BUDGETS_URL}/{budget_id}").status_code == 404
-        assert client.get(BUDGETS_URL).get_json()["budgets"] == []
-
-
-class TestWorkspaceBudgetAuthorization:
-    def test_workspace_owner_can_manage_workspace_budget(self, client, make_user, login):
-        owner = make_user(username="owner", email="owner@example.com")
-        workspace = _workspace(owner)
-        login(email="owner@example.com")
-        budget_id = _create(client, workspace_id=workspace.id).get_json()["id"]
-
-        assert client.get(f"{BUDGETS_URL}/{budget_id}").status_code == 200
-        assert (
-            client.patch(f"{BUDGETS_URL}/{budget_id}", json={"limit_amount": 42}).status_code == 200
+        monkeypatch.setattr(budgets, "usage_totals", boom)
+        response = client.post(
+            f"/api/conversations/{conversation.id}/messages",
+            json={"content": "hello"},
         )
-        assert client.delete(f"{BUDGETS_URL}/{budget_id}").status_code == 204
+        assert response.status_code == 503
+        assert response.get_json()["kind"] == "budget_check_failed"
 
-    def test_workspace_member_gets_uniform_404(self, client, make_user, login):
-        owner = make_user(username="owner", email="owner@example.com")
-        member = make_user(username="member", email="member@example.com")
-        workspace = _workspace(owner)
-        _member(workspace, member, ROLE_CONTRIBUTOR)
-        login(email="owner@example.com")
-        budget_id = _create(client, workspace_id=workspace.id).get_json()["id"]
+    def test_user_budget_applies_to_workspace_conversation(self, client, make_user, login):
+        user = make_user()
+        workspace = _workspace(user)
+        _token_budget(user, 1)
+        _usage(user, tokens=1)
+        conversation = _conversation(user, workspace)
+        login()
 
-        login(email="member@example.com")
-        for method, url, kwargs in [
-            ("get", f"{BUDGETS_URL}/{budget_id}", {}),
-            ("patch", f"{BUDGETS_URL}/{budget_id}", {"json": {"limit_amount": 1}}),
-            ("delete", f"{BUDGETS_URL}/{budget_id}", {}),
-        ]:
-            response = getattr(client, method)(url, **kwargs)
-            assert response.status_code == 404
-            assert response.get_json() == {
-                "error": "Budget not found.",
-                "kind": "not_found",
-            }
-
-        # A member cannot create a budget in a workspace they do not own.
-        assert _create(client, workspace_id=workspace.id).status_code == 404
-        # The list remains scoped to the member's own (empty) user budgets.
-        assert client.get(BUDGETS_URL).get_json()["budgets"] == []
-
-    def test_non_member_gets_uniform_404(self, client, make_user, login):
-        owner = make_user(username="owner", email="owner@example.com")
-        make_user(username="outsider", email="outsider@example.com")
-        workspace = _workspace(owner)
-        login(email="owner@example.com")
-        budget_id = _create(client, workspace_id=workspace.id).get_json()["id"]
-
-        login(email="outsider@example.com")
-        assert client.get(f"{BUDGETS_URL}/{budget_id}").status_code == 404
-        assert _create(client, workspace_id=workspace.id).status_code == 404
-
-    def test_site_admin_can_manage_workspace_budgets(self, client, make_user, login):
-        owner = make_user(username="owner", email="owner@example.com")
-        admin = make_user(username="admin", email="admin@example.com")
-        admin.is_admin = True
-        db.session.commit()
-        workspace = _workspace(owner)
-        login(email="owner@example.com")
-        budget_id = _create(client, workspace_id=workspace.id).get_json()["id"]
-
-        login(email="admin@example.com")
-        listing = client.get(BUDGETS_URL)
-        assert [item["id"] for item in listing.get_json()["budgets"]] == [budget_id]
-        assert client.get(f"{BUDGETS_URL}/{budget_id}").status_code == 200
-        assert (
-            client.patch(f"{BUDGETS_URL}/{budget_id}", json={"limit_amount": 900}).status_code
-            == 200
+        response = client.post(
+            f"/api/conversations/{conversation.id}/messages",
+            json={"content": "hello"},
         )
-        assert _create(client, workspace_id=workspace.id).status_code == 201
-        assert client.delete(f"{BUDGETS_URL}/{budget_id}").status_code == 204
+        assert response.status_code == 429
+        assert response.get_json()["limits_hit"] == ["tokens"]
 
-    def test_list_only_returns_accessible_workspace_budgets(self, client, make_user, login):
-        owner = make_user(username="owner", email="owner@example.com")
-        other_owner = make_user(username="other", email="other@example.com")
-        member = make_user(username="member", email="member@example.com")
 
-        first = _workspace(owner, name="First")
-        second = _workspace(other_owner, name="Second")
-        _member(first, member, ROLE_VIEWER)
+class TestBudgetValidationUnit:
+    def test_period_must_be_monthly(self):
+        with pytest.raises(budgets.BudgetValidationError):
+            budgets.validate_period("weekly")
 
-        login(email="owner@example.com")
-        first_id = _create(client, workspace_id=first.id).get_json()["id"]
-
-        login(email="other@example.com")
-        second_id = _create(client, workspace_id=second.id).get_json()["id"]
-
-        login(email="member@example.com")
-        assert client.get(BUDGETS_URL).get_json()["budgets"] == []
-
-        login(email="owner@example.com")
-        ids = {item["id"] for item in client.get(BUDGETS_URL).get_json()["budgets"]}
-        assert ids == {first_id}
-        assert second_id not in ids
+    def test_scope_must_be_known(self, app, make_user):
+        user = make_user()
+        with pytest.raises(budgets.BudgetValidationError):
+            budgets.upsert_budget(scope="team", scope_id=user.id, token_limit=1)

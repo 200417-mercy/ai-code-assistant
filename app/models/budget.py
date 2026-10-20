@@ -1,36 +1,38 @@
-"""Spending budgets (Phase 10, issues #461 and #468).
+"""Budget and quota model (Phase 10).
 
-A budget belongs to exactly one owner. Two scopes are supported:
-
-* **user budget** — ``workspace_id`` is null; only the owning user may read or
-  modify it, even if another account is a site administrator;
-* **workspace budget** — ``workspace_id`` is set; the workspace owner and site
-  administrators may read or modify it.
-
-Amounts are stored in the configured display currency (three-letter code). The
-model deliberately stores no derived spend: dashboards compute spend from the
-append-only :class:`~app.models.usage_record.UsageRecord` ledger so a budget can
-never fabricate usage.
+A budget applies to exactly one scope - a user or a workspace - for one
+monthly period. Both quota types are optional, so a budget may limit tokens,
+cost, or both. Enforcement is fail-closed: when a configured limit is reached,
+LLM calls are refused before the provider is invoked.
 """
 
 from datetime import UTC, datetime
 
 from app.extensions import db
 
-#: Periods understood by budget validation and dashboards.
-BUDGET_PERIODS = ("daily", "weekly", "monthly", "yearly")
+PERIOD_MONTHLY = "monthly"
+PERIODS = (PERIOD_MONTHLY,)
+
+SCOPE_USER = "user"
+SCOPE_WORKSPACE = "workspace"
+SCOPES = (SCOPE_USER, SCOPE_WORKSPACE)
+
+DEFAULT_WARN_THRESHOLD = 0.8
 
 
 class Budget(db.Model):
-    """A user- or workspace-scoped spending limit."""
+    """A monthly token and/or cost budget for a user or workspace."""
 
     __tablename__ = "budgets"
 
     id = db.Column(db.Integer, primary_key=True)
+    #: Exactly one of ``user_id``/``workspace_id`` is set (enforced by a
+    #: check constraint). User budgets follow the user; workspace budgets are
+    #: owned by the workspace and survive membership changes.
     user_id = db.Column(
         db.Integer,
         db.ForeignKey("users.id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=True,
         index=True,
     )
     workspace_id = db.Column(
@@ -39,14 +41,19 @@ class Budget(db.Model):
         nullable=True,
         index=True,
     )
-    name = db.Column(db.String(200), nullable=False)
-    limit_amount = db.Column(db.Float, nullable=False)
-    currency = db.Column(db.String(3), nullable=False, default="USD")
-    period = db.Column(db.String(20), nullable=False, default="monthly")
+    period = db.Column(db.String(20), nullable=False, default=PERIOD_MONTHLY)
+    #: Maximum total tokens for the period. ``None`` disables the token quota.
+    token_limit = db.Column(db.Integer, nullable=True)
+    #: Maximum estimated cost for the period. ``None`` disables the cost quota.
+    cost_limit = db.Column(db.Float, nullable=True)
+    #: Fraction of a limit at which a warning is emitted (0 < threshold <= 1).
+    warn_threshold = db.Column(db.Float, nullable=False, default=DEFAULT_WARN_THRESHOLD)
+    is_active = db.Column(db.Boolean, nullable=False, default=True, index=True)
+    created_by_id = db.Column(
+        db.Integer, db.ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
     created_at = db.Column(
-        db.DateTime(timezone=True),
-        nullable=False,
-        default=lambda: datetime.now(UTC),
+        db.DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
     )
     updated_at = db.Column(
         db.DateTime(timezone=True),
@@ -55,29 +62,53 @@ class Budget(db.Model):
         onupdate=lambda: datetime.now(UTC),
     )
 
-    owner = db.relationship("User", foreign_keys=[user_id], lazy="select")
-    workspace = db.relationship("Workspace", foreign_keys=[workspace_id], lazy="select")
+    __table_args__ = (
+        db.CheckConstraint(
+            "(user_id IS NOT NULL AND workspace_id IS NULL) OR "
+            "(user_id IS NULL AND workspace_id IS NOT NULL)",
+            name="ck_budgets_exactly_one_scope",
+        ),
+        db.CheckConstraint(
+            "token_limit IS NOT NULL OR cost_limit IS NOT NULL",
+            name="ck_budgets_has_limit",
+        ),
+        db.CheckConstraint(
+            "warn_threshold > 0 AND warn_threshold <= 1",
+            name="ck_budgets_warn_threshold",
+        ),
+        db.Index("ix_budgets_scope_period", "user_id", "workspace_id", "period"),
+    )
 
     @property
     def scope(self) -> str:
-        """Return ``"workspace"`` or ``"user"``."""
-        return "workspace" if self.workspace_id is not None else "user"
+        """Return ``"user"`` or ``"workspace"`` for this budget."""
+        return SCOPE_USER if self.user_id is not None else SCOPE_WORKSPACE
+
+    @property
+    def scope_id(self) -> int:
+        """Return the id of the user or workspace this budget applies to."""
+        return self.user_id if self.user_id is not None else self.workspace_id
 
     def to_dict(self) -> dict:
-        """Serialize the budget for JSON API responses."""
+        """Serialize the budget configuration."""
         return {
             "id": self.id,
+            "scope": self.scope,
+            "scope_id": self.scope_id,
             "user_id": self.user_id,
             "workspace_id": self.workspace_id,
-            "scope": self.scope,
-            "name": self.name,
-            "limit_amount": self.limit_amount,
-            "currency": self.currency,
             "period": self.period,
+            "token_limit": self.token_limit,
+            "cost_limit": self.cost_limit,
+            "warn_threshold": self.warn_threshold,
+            "is_active": bool(self.is_active),
+            "created_by_id": self.created_by_id,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
-        scope = f"workspace={self.workspace_id}" if self.workspace_id else f"user={self.user_id}"
-        return f"<Budget id={self.id} {scope} {self.period} {self.limit_amount}>"
+        return (
+            f"<Budget id={self.id} scope={self.scope} scope_id={self.scope_id} "
+            f"tokens={self.token_limit} cost={self.cost_limit}>"
+        )
