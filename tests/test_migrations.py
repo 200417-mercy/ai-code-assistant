@@ -127,10 +127,26 @@ class TestMigrationHead:
         result = _run_flask(["db", "heads"], {"DATABASE_URL": "sqlite:///:memory:"})
         assert result.returncode == 0, result.stderr
         output = result.stdout + result.stderr
-        assert "f0a1b2c3d4e5" in output
+        assert "a8b9c0d1e2f3" in output
         # The merge revision must be the single head (no dangling branches).
         head_lines = [line for line in output.splitlines() if "(head)" in line]
         assert len(head_lines) == 1
+
+    def test_budgets_table_upgraded(self):
+        expected = {
+            "id",
+            "user_id",
+            "workspace_id",
+            "token_limit",
+            "cost_limit",
+            "period",
+            "created_at",
+            "updated_at",
+        }
+        with _migration_db() as db_url, _inspect(db_url) as insp:
+            assert "budgets" in set(insp.get_table_names())
+            columns = {col["name"] for col in insp.get_columns("budgets")}
+            assert columns == expected
 
     def test_workspace_price_overrides_table_upgraded(self):
         expected = {

@@ -829,18 +829,47 @@ class PluginRegistry:
         self._hooks[event_type].append((plugin_id, handler))
         logger.debug(f"Subscribed plugin {plugin_id} to {event_type}")
 
-    def dispatch(self, event_type: str, data: dict[str, Any] | None = None) -> None:
+    def dispatch(
+        self,
+        event_type: str,
+        data: dict[str, Any] | None = None,
+        *,
+        workspace_id: int | None = None,
+        required_capability: str | None = None,
+    ) -> None:
         """Dispatch event to subscribed plugins.
 
-        Failures are isolated - one plugin failure does not affect others. Each
-        handler runs under the configured execution budget and a failure is
-        recorded as a bounded error report when an app context is available.
+        Capability checks are made immediately before each handler call and fail
+        closed: a missing grant, an unknown plugin, or a mismatched workspace
+        refuses the call. Failures are isolated - one plugin failure does not
+        affect others. Each handler runs under the configured execution budget
+        and a failure is recorded as a bounded error report when an app context
+        is available.
         """
         if not data:
             data = {}
 
         handlers = self._hooks.get(event_type, [])
         for plugin_id, handler in handlers:
+            if required_capability is not None:
+                if workspace_id is None:
+                    logger.warning(
+                        "Refusing %s handler for %s: workspace is required for capability checks",
+                        event_type,
+                        plugin_id,
+                    )
+                    continue
+                from app.services.capabilities import CapabilityStore
+
+                if not CapabilityStore.has_capability(plugin_id, workspace_id, required_capability):
+                    logger.warning(
+                        "Refusing %s handler for %s: missing %s capability in workspace %s",
+                        event_type,
+                        plugin_id,
+                        required_capability,
+                        workspace_id,
+                    )
+                    continue
             try:
                 run_with_timeout(
                     partial(handler, event_type=event_type, data=data),
