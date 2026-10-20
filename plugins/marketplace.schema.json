@@ -1,0 +1,165 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://ai-code-assistant.local/schemas/marketplace.schema.json",
+  "title": "AI Code Assistant Marketplace Catalog Entry",
+  "description": "A normalized marketplace entry. The same document also accepts the existing installer catalog shape (id/version/source/integrity/manifest) so operators can validate a published catalog without changing the loader.",
+  "type": "object",
+  "required": ["id", "version"],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,63}$",
+      "description": "Unique plugin identifier (lowercase kebab-case or snake_case)"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "description": "Human-readable plugin name"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d?)(?:-((?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\\.(?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\\+([0-9a-zA-Z-]+(?:\\.[0-9a-zA-Z-]+)*))?$",
+      "description": "Semantic version (for example 0.1.0 or 1.0.0-alpha)"
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048
+    },
+    "author": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "PROJECT_READ",
+          "PROJECT_WRITE",
+          "PROJECT_DELETE",
+          "WORKSPACE_READ",
+          "WORKSPACE_WRITE",
+          "GITHUB_READ",
+          "GITHUB_WRITE",
+          "AI_ACCESS",
+          "AI_ANALYSIS",
+          "NOTIFICATION_CREATE",
+          "STELLAR_READ",
+          "STELLAR_WRITE",
+          "STELLAR_ANALYSIS",
+          "REVIEW_READ",
+          "REVIEW_CREATE"
+        ]
+      },
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "permissions": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "uniqueItems": true
+    },
+    "dependencies": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "uniqueItems": true
+    },
+    "compatibility": {
+      "type": "string",
+      "description": "Optional PEP 440 range of supported application versions."
+    },
+    "artifact": {
+      "type": "object",
+      "required": ["url", "sha256", "publisher_key_id"],
+      "additionalProperties": false,
+      "properties": {
+        "url": {
+          "type": "string",
+          "pattern": "^https://[^\\s]+$",
+          "maxLength": 512
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^(?:sha256:)?[0-9a-fA-F]{64}$"
+        },
+        "publisher_key_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+        }
+      }
+    },
+    "artifact_url": {
+      "type": "string",
+      "pattern": "^https://[^\\s]+$",
+      "maxLength": 512
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^(?:sha256:)?[0-9a-fA-F]{64}$"
+    },
+    "publisher_key_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "source": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "description": "Installer catalog artifact source (https URL or opaque local identifier)."
+    },
+    "integrity": {
+      "type": "string",
+      "pattern": "^(?:sha256[:=-])?[0-9a-fA-F]{64}$",
+      "description": "Installer catalog sha256 integrity hash."
+    },
+    "manifest": {
+      "type": "object",
+      "description": "Installer catalog embedded manifest, validated separately by plugin.schema.json."
+    },
+    "signature": {
+      "type": "object",
+      "required": ["publisher", "algorithm", "value"],
+      "additionalProperties": false,
+      "properties": {
+        "publisher": {"type": "string", "minLength": 1, "maxLength": 256},
+        "algorithm": {"const": "ed25519"},
+        "value": {"type": "string", "minLength": 1}
+      }
+    }
+  },
+  "anyOf": [
+    {
+      "required": [
+        "name",
+        "description",
+        "author",
+        "capabilities",
+        "permissions",
+        "dependencies",
+        "compatibility",
+        "artifact"
+      ]
+    },
+    {
+      "required": [
+        "name",
+        "description",
+        "author",
+        "capabilities",
+        "permissions",
+        "dependencies",
+        "compatibility",
+        "artifact_url",
+        "sha256",
+        "publisher_key_id"
+      ]
+    },
+    {
+      "required": ["source", "integrity", "manifest"]
+    }
+  ]
+}

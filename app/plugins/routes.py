@@ -56,23 +56,26 @@ from app.services.plugin_ops import (
     PluginEntryPointMismatchError,
     PluginNotFoundError,
     PluginUpdateError,
+    RemoteInstallError,
     atomic_rollback,
     atomic_update_from_catalog,
     discover_plugins,
     rollback_from_catalog,
     update_plugin,
+    validate_catalog_install,
 )
 from app.services.plugin_signatures import (
     VERIFY_IF_PRESENT,
     PublisherSignatureError,
     enforce_publisher_trust,
+    evaluate_signature,
 )
 from app.services.plugin_trust import (
     PluginTrustConfigError,
     trusted_publisher_ids,
 )
 from app.services.plugin_updates import notify_available_updates, update_plan
-from app.services.plugin_versions import is_newer
+from app.services.plugin_versions import is_newer, latest_version
 from app.services.plugins import ManifestValidationError, PluginError, PluginManifest
 
 #: Hard maximum number of plugins returned in a single marketplace page (#379).
@@ -168,6 +171,107 @@ def _serialize(plugin: Plugin, workspace_id: int) -> dict:
             "enable": bool(can_manage and installed and not enabled),
             "disable": bool(can_manage and installed and enabled),
             "uninstall": bool(can_manage and installed),
+        },
+    }
+
+
+def _catalog_entry_state(
+    entry,
+    workspace_id: int,
+    *,
+    versions_by_id: dict[str, list],
+) -> dict:
+    """Serialize one catalog entry with per-workspace install/update state.
+
+    Only safe metadata is exposed: no configuration values, artifact bytes or
+    key material. Trust is evaluated without raising so a forged signature is
+    shown as ``Invalid`` instead of breaking the whole browse response.
+    """
+    manifest = entry.manifest or {}
+    compatibility = manifest.get("compatibility")
+    if not isinstance(compatibility, str):
+        compatibility = None
+    status = compatibility_status(compatibility)
+    trusted_publishers = current_app.config.get("PLUGIN_TRUSTED_KEYS") or {}
+    signature = entry.signature if entry.signature is not None else manifest.get("signature")
+    trust = evaluate_signature(manifest, signature, trusted_publishers)
+    publisher_key_id = trust.publisher or entry.publisher
+
+    installed_plugin = db.session.get(Plugin, entry.plugin_id)
+    installation = _installation(entry.plugin_id, workspace_id)
+    installed = installation is not None and installed_plugin is not None
+    installed_version = installed_plugin.version if installed else None
+    enabled = bool(installed and installation.enabled)
+
+    all_versions = versions_by_id.get(entry.plugin_id, [])
+    latest = all_versions[-1].version if all_versions else entry.version
+    newer = [
+        candidate.version
+        for candidate in all_versions
+        if installed and is_newer(candidate.version, installed_version)
+    ]
+    older = [
+        candidate.version
+        for candidate in all_versions
+        if installed and is_newer(installed_version, candidate.version)
+    ]
+
+    rollback_version = None
+    if installed:
+        lock_entry = PluginLockEntry.query.filter_by(
+            workspace_id=workspace_id,
+            plugin_id=entry.plugin_id,
+        ).first()
+        if lock_entry is not None and is_newer(installed_version, lock_entry.version):
+            rollback_version = lock_entry.version
+        else:
+            rollback_version = latest_version(older)
+
+    can_manage = can("manage_plugins", workspace_id)
+    update_version = latest_version(newer)
+    dependencies = list(manifest.get("dependencies") or [])
+    return {
+        "id": entry.plugin_id,
+        "plugin_id": entry.plugin_id,
+        "workspace_id": workspace_id,
+        "name": manifest.get("name") or entry.plugin_id,
+        "version": entry.version,
+        "latest_version": latest,
+        "is_latest": entry.version == latest,
+        "description": manifest.get("description") or "",
+        "author": manifest.get("author") or "",
+        "capabilities": list(manifest.get("capabilities") or []),
+        "permissions": list(manifest.get("permissions") or []),
+        "dependencies": dependencies,
+        "dependency_count": len(dependencies),
+        "compatibility": compatibility or "any",
+        "compatible_with_app": bool(status["compatible"]),
+        "app_version": status["app_version"],
+        "trust_state": trust.state,
+        "trust_publisher": trust.publisher,
+        "publisher_key_id": publisher_key_id,
+        "signature_present": bool(trust.signature_present),
+        "source": entry.source,
+        "integrity": entry.integrity,
+        "artifact_sha256": entry.integrity,
+        "artifact": {
+            "url": entry.source,
+            "sha256": entry.integrity,
+            "publisher_key_id": publisher_key_id,
+        },
+        "installed": installed,
+        "installed_version": installed_version,
+        "enabled": enabled,
+        "update_available": bool(newer),
+        "update_version": update_version,
+        "rollback_available": rollback_version is not None,
+        "rollback_version": rollback_version,
+        "role": role_for(workspace_id, current_user),
+        "can_manage": can_manage,
+        "actions": {
+            "install": bool(can_manage and not installed),
+            "update": bool(can_manage and installed and update_version is not None),
+            "rollback": bool(can_manage and installed and rollback_version is not None),
         },
     }
 
@@ -406,6 +510,71 @@ def api_list_plugins(workspace_id: int):
     )
 
 
+@bp.route("/api/workspaces/<int:workspace_id>/catalog", methods=["GET"])
+@bp.route("/api/workspaces/<int:workspace_id>/marketplace", methods=["GET"])
+@login_required
+def api_browse_catalog(workspace_id: int):
+    """Browse the marketplace catalog (readable by any workspace member).
+
+    Returns catalog entries with trust, compatibility, dependency metadata,
+    artifact/source integrity and per-workspace install/update/rollback state.
+    Pagination uses the same bounded, deterministic convention as the plugin
+    list (page >= 1, limit clamped to :data:`MAX_PAGE_LIMIT`, sorted by plugin
+    id then version). Members are read-only: ``actions`` is only true when the
+    caller holds ``manage_plugins``, and every mutating endpoint independently
+    enforces that role.
+    """
+    workspace = resolve_workspace(workspace_id)
+    try:
+        catalog = load_plugin_catalog(current_app.config)
+    except CatalogUnavailableError as exc:
+        return jsonify({"error": str(exc), "code": "catalog_unavailable"}), 404
+    except CatalogError as exc:
+        return jsonify({"error": f"Invalid plugin catalog: {exc}"}), 400
+
+    page = request.args.get("page", type=int)
+    if page is None or page < 1:
+        page = 1
+    limit = request.args.get("limit", type=int)
+    if limit is None:
+        limit = DEFAULT_PAGE_LIMIT
+    limit = max(1, min(limit, MAX_PAGE_LIMIT))
+
+    versions_by_id: dict[str, list] = {}
+    for entry in catalog.list_entries():
+        versions_by_id.setdefault(entry.plugin_id, []).append(entry)
+
+    all_entries = list(catalog.list_entries())
+    total = len(all_entries)
+    pages = (total + limit - 1) // limit if total else 0
+    offset = (page - 1) * limit
+    page_entries = all_entries[offset : offset + limit]
+    plugins = [
+        _catalog_entry_state(entry, workspace_id, versions_by_id=versions_by_id)
+        for entry in page_entries
+    ]
+    return jsonify(
+        {
+            "workspace": {
+                "id": workspace.id,
+                "role": role_for(workspace_id, current_user),
+            },
+            "plugins": plugins,
+            "entries": plugins,
+            "pagination": {
+                "page": page,
+                "limit": limit,
+                "max_limit": MAX_PAGE_LIMIT,
+                "total": total,
+                "pages": pages,
+                "has_next": page < pages,
+                "has_prev": page > 1,
+            },
+            "ordering": ["id", "version"],
+        }
+    )
+
+
 @bp.route("/api/workspaces/<int:workspace_id>/plugins/<plugin_id>", methods=["GET"])
 @login_required
 def api_inspect_plugin(workspace_id: int, plugin_id: str):
@@ -590,6 +759,19 @@ def api_install_plugin_from_catalog(workspace_id: int):
             reason="invalid catalog version",
         )
         return jsonify({"error": f"Invalid plugin version: {exc}"}), 400
+
+    try:
+        validate_catalog_install(catalog, entry)
+    except RemoteInstallError as exc:
+        record_plugin_audit(
+            workspace_id,
+            "denied",
+            actor=current_user,
+            plugin_id=entry.plugin_id,
+            outcome="denied",
+            reason="dependency validation failed",
+        )
+        return jsonify({"error": str(exc)}), 400
 
     trusted_publishers = current_app.config.get("PLUGIN_TRUSTED_KEYS") or {}
     try:
@@ -953,6 +1135,11 @@ def api_rollback_plugin(workspace_id: int, plugin_id: str):
         workspace_id=workspace_id,
         plugin_id=plugin_id,
     ).first()
+    if lock_entry is None and not (
+        current_app.config.get("PLUGIN_CATALOG_FILE")
+        or current_app.config.get("PLUGIN_MARKETPLACE_URL")
+    ):
+        return jsonify({"error": "No lockfile history or catalog is available for rollback."}), 404
 
     try:
         if lock_entry is not None and is_newer(current_version, lock_entry.version):
@@ -989,18 +1176,6 @@ def api_rollback_plugin(workspace_id: int, plugin_id: str):
         return jsonify({"error": str(exc)}), 400
     except (CatalogUnavailableError, CatalogError) as exc:
         db.session.rollback()
-        if lock_entry is None:
-            return (
-                jsonify(
-                    {
-                        "error": (
-                            "No lockfile history is available for this plugin "
-                            f"and no catalog fallback is usable: {exc}"
-                        )
-                    }
-                ),
-                404,
-            )
         return jsonify({"error": str(exc)}), 404
 
     record_plugin_audit(
@@ -1286,16 +1461,17 @@ def api_list_plugin_errors(workspace_id: int):
 
 @bp.route("/api/workspaces/<int:workspace_id>/lockfile", methods=["GET"])
 @login_required
-@require_workspace_capability("manage_plugins")
 def api_get_lockfile(workspace_id: int):
     """Return the resolved plugin lockfile for a workspace.
 
-    The lockfile lists every plugin pinned for the workspace, including the
-    resolved version, artifact source, integrity hash, and declared dependencies.
-    It is owner-scoped and never exposes secrets or artifact contents.
+    Readable by any workspace member (read-only); mutating plugin management
+    still requires the owner. The lockfile lists every plugin pinned for the
+    workspace, including the resolved version, artifact source, integrity hash,
+    and declared dependencies. It never exposes secrets or artifact contents.
     """
     from app.services.plugin_lockfile import build_lockfile
 
+    resolve_workspace(workspace_id)
     lock_entries = PluginLockEntry.query.filter_by(workspace_id=workspace_id).all()
     lockfile = build_lockfile(lock_entries)
     return jsonify(lockfile)

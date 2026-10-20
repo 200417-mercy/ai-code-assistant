@@ -678,7 +678,7 @@ class TestMigrationHead:
             db_url = f"sqlite:///{os.path.join(tmp, 'mig_budgets.db')}"
             up = _run_flask(["db", "upgrade"], {"DATABASE_URL": db_url})
             assert up.returncode == 0, up.stderr
-            down = _run_flask(["db", "downgrade", "f0a1b2c3d4e5"], {"DATABASE_URL": db_url})
+            down = _run_flask(["db", "downgrade", "b7d8e9f0a1c2"], {"DATABASE_URL": db_url})
             assert down.returncode == 0, down.stderr
             with _inspect(db_url) as insp:
                 assert "budgets" not in set(insp.get_table_names())
