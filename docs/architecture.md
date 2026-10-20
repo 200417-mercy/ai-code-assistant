@@ -180,8 +180,9 @@ Plugins are **workspace-scoped** at runtime but globally declared:
   recorded as bounded `PluginErrorReport` rows (`plugin_errors.py`).
 - Operator surfaces: the workspace management API (`app/plugins/routes.py`),
   the plugin UI page, and the `flask plugins …` CLI (`plugins_cli.py` +
-  `plugin_ops.py`), which supports `--json`, distinct exit codes, and local-only
-  installs. See [docs/plugins.md](plugins.md).
+  `plugin_ops.py`), which supports `--json`, distinct exit codes, local-path
+  installs, and catalog-pinned remote installs (never client-supplied URLs). See
+  [docs/plugins.md](plugins.md).
 
 ## Security model
 

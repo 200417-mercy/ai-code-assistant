@@ -64,6 +64,8 @@ fail-closed, so a fresh install cannot reach a marketplace or the network:
 | Setting | Default | Why it is safe |
 | ------- | ------- | -------------- |
 | `PLUGIN_CATALOG_FILE` | empty | Remote/catalog installation is disabled until an operator points at a vetted catalog. |
+| `PLUGIN_MARKETPLACE_URL` | empty | Remote catalog fetching is disabled; when set it must be HTTPS, allowlisted, timeout/size-bounded, and redirect-free. |
+| `PLUGIN_DISCOVERY_DIR` | `plugins` | Read-only directory scanned for manifests by `GET /plugins/discover`; nothing is installed or executed. |
 | `PLUGIN_TRUST_POLICY` | `if-present` | Accepts unsigned local plugins, but always refuses forged or untrusted signatures. Use `required` in production. |
 | `PLUGIN_TRUSTED_KEYS` | `{}` | No publisher is trusted by default; keys are validated at startup. |
 | `PLUGIN_NETWORK_ALLOWLIST` | empty | Every plugin outbound request is denied. Add only the hosts a plugin needs. |

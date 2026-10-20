@@ -771,8 +771,13 @@ configuration, audit/error reporting, and the plugin-writing guide.
 
 - **Never grant implicitly.** Capabilities are explicit, per-workspace grants;
   install/enable never creates them.
-- **Keep installs local/trusted.** Do not add remote/URL installation. Never
-  make the management API/CLI load or execute plugin code.
+- **Installs are signed and allowlisted.** Local manifests remain supported;
+  remote installs must resolve through the operator-controlled catalog
+  (`PLUGIN_CATALOG_FILE` or the allowlisted `PLUGIN_MARKETPLACE_URL`) over
+  HTTPS, verify the catalog `integrity` hash, and obey `PLUGIN_TRUST_POLICY`
+  (Ed25519 publisher signatures; `required` refuses unsigned entries). Never
+  accept a client-supplied artifact URL. Never make the management API/CLI load
+  or execute plugin code, and never grant capabilities implicitly.
 - **Fail closed.** Dispatch-time capability enforcement and workspace
   isolation must stay intact (see `docs/security.md`).
 - **Isolate failures.** Plugin handler/hook failures must never crash a request

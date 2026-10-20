@@ -30,9 +30,11 @@ my_plugin/
 └── README.md         # optional
 ```
 
-Discovery is **local-only**: an operator points `flask plugins install` at a
-filesystem path. There is no remote/URL installation and the management API
-never loads or executes plugin code by itself.
+Discovery defaults to local manifests: an operator points `flask plugins
+install` at a filesystem path. Remote installation is supported only through the
+operator-controlled, signed catalog (`PLUGIN_CATALOG_FILE` or the allowlisted
+`PLUGIN_MARKETPLACE_URL`); the management API never accepts a client-supplied
+URL and never loads or executes plugin code by itself.
 
 ## 2. Author the manifest
 

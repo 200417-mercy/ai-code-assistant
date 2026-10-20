@@ -156,6 +156,51 @@ configuration (see "Known limitations / planned hardening").
 - `tests/test_plugin_lock_entries.py` — lock-entry scoping, uniqueness, and
   canonical lockfile serialization.
 
+## Marketplace trust model
+
+The marketplace is a distribution surface, not a privilege boundary. Trust is
+established in layers, and every layer fails closed:
+
+1. **Source.** The catalog is operator-controlled: a local JSON document
+   (`PLUGIN_CATALOG_FILE`, or `PLUGIN_MARKETPLACE_CATALOG` for the read-only
+   discovery API) or a remote document fetched through
+   `app/services/plugin_network.py`. Remote fetches must use HTTPS, the host
+   must be on `PLUGIN_NETWORK_ALLOWLIST`, and the request is timeout/size
+   bounded with redirects refused.
+2. **Entry validation.** Each entry is parsed by
+   `app/services/plugin_catalog.py`: canonical plugin id/version, HTTPS
+   artifact source, sha256 `integrity`, an embedded manifest whose id/version
+   match the entry, and an optional detached Ed25519 signature. Discovery
+   entries additionally validate the manifest against
+   `plugins/plugin.schema.json`. Malformed entries reject the catalog.
+3. **Publisher identity.** `app/services/plugin_signatures.py` verifies the
+   signature over the canonical manifest body. Forged, malformed, and
+   unknown-publisher signatures are refused under every policy; with
+   `PLUGIN_TRUST_POLICY=required`, unsigned entries are refused too.
+   `PLUGIN_TRUSTED_KEYS` is validated at startup and key material is never
+   exposed by the API or CLI.
+4. **Install.** Catalog installs are owner-only, resolve `(id, version)`
+   server-side, and validate the dependency graph
+   (`app/services/plugin_deps.py`) before writing anything. Cycles and missing
+   catalog dependencies are rejected. Install registers metadata only: it does
+   not download or execute the artifact and does not create capability grants.
+5. **Update / rollback.** Updates resolve a catalog target and run atomically;
+   a failed update leaves the previous installation intact. Rollback restores
+   the lockfile/catalog target. Both require `manage_plugins`, and every
+   mutation is audited.
+6. **Lockfile.** `PluginLockEntry` pins id, version, source, sha256 integrity,
+   and declared dependencies per workspace. Serialization is canonical and
+   omits timestamps, so diffs are reproducible. The lockfile never contains
+   secrets and never implies a capability grant.
+7. **Read-only discovery.** `GET /plugins/api/marketplace` returns advertised
+   metadata only. Catalog content is untrusted input: it is never executed and
+   never used to grant a capability.
+
+Implementation and tests are listed in
+[the plugin guide](plugins.md#marketplace-trust-model-end-to-end). The
+threat-review rows above cover the concrete controls; this section is the
+end-to-end view for reviewers and operators.
+
 ## Known limitations / planned hardening
 
 - Custom-network endpoints are restricted to loopback; a production operator
