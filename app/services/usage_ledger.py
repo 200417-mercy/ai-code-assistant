@@ -291,6 +291,55 @@ def record_usage(
     return record
 
 
+#: Default and hard cap for leaderboard responses.
+TOP_DEFAULT_LIMIT = 10
+TOP_MAX_LIMIT = 50
+
+
+def top_entities(*, user_id, limit=TOP_DEFAULT_LIMIT) -> dict:
+    """Return bounded top conversations and projects by cost, then tokens.
+
+    ``user_id`` is mandatory so a leaderboard can never cross account
+    boundaries. Rows without a conversation/project id are excluded.
+    """
+    limit = limit if isinstance(limit, int) and limit >= 1 else TOP_DEFAULT_LIMIT
+    limit = min(limit, TOP_MAX_LIMIT)
+
+    def _top(column):
+        rows = (
+            UsageRecord.query.with_entities(
+                column.label("id"),
+                func.count(UsageRecord.id).label("records"),
+                func.coalesce(func.sum(UsageRecord.total_tokens), 0).label("total_tokens"),
+                func.coalesce(func.sum(UsageRecord.cost_estimate), 0.0).label("cost_estimate"),
+            )
+            .filter(UsageRecord.user_id == user_id, column.isnot(None))
+            .group_by(column)
+            .order_by(
+                func.coalesce(func.sum(UsageRecord.cost_estimate), 0.0).desc(),
+                func.coalesce(func.sum(UsageRecord.total_tokens), 0).desc(),
+                column.asc(),
+            )
+            .limit(limit)
+            .all()
+        )
+        return [
+            {
+                "id": int(row.id),
+                "records": int(row.records),
+                "total_tokens": int(row.total_tokens or 0),
+                "cost_estimate": pricing.round_cost(float(row.cost_estimate or 0.0)),
+            }
+            for row in rows
+        ]
+
+    return {
+        "limit": limit,
+        "conversations": _top(UsageRecord.conversation_id),
+        "projects": _top(UsageRecord.project_id),
+    }
+
+
 def summarize_records(records) -> dict:
     """Aggregate counts and costs for an iterable of records."""
     summary = {
@@ -755,6 +804,8 @@ __all__ = [
     "STATUS_DENIED",
     "STATUS_ERROR",
     "STATUS_SUCCESS",
+    "TOP_DEFAULT_LIMIT",
+    "TOP_MAX_LIMIT",
     "UNKNOWN_SOURCE",
     "backfill_from_messages",
     "breakdown_by_source",
@@ -772,4 +823,5 @@ __all__ = [
     "source_bucket",
     "summarize_query",
     "summarize_records",
+    "top_entities",
 ]
