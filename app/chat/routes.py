@@ -21,6 +21,7 @@ from flask_login import current_user, login_required
 from sqlalchemy import func
 
 from app.chat import bp
+from app.collaboration import realtime
 from app.extensions import db
 from app.models import (
     Conversation,
@@ -33,7 +34,7 @@ from app.models import (
 )
 from app.models.message_attachment import ALLOWED_IMAGE_TYPES
 from app.models.project import STATUS_READY
-from app.services import audit, chat_export, token_usage, usage_ledger
+from app.services import audit, budgets, chat_export, token_usage, usage_ledger
 from app.services.conversation_search import search_conversations
 from app.services.github import (
     GitHubError,
@@ -829,6 +830,7 @@ def _record_chat_ledger(conversation: Conversation, usage: dict | None) -> None:
 
 @bp.route("/conversations/<int:conversation_id>/messages", methods=["POST"])
 @login_required
+@budgets.budget_guard
 def send_message(conversation_id: int):
     """Store a user message and return the full (non-streamed) assistant reply.
 
@@ -886,11 +888,14 @@ def send_message(conversation_id: int):
     if conversation.title == "New conversation":
         conversation.title = content.strip()[:60] or "New conversation"
     db.session.commit()
+    realtime.broadcast_message(conversation, user_message, sender=current_user)
+    realtime.broadcast_message(conversation, conversation.messages[-1])
     return jsonify({"assistant_message": conversation.messages[-1].to_dict()}), 201
 
 
 @bp.route("/conversations/<int:conversation_id>/stream", methods=["POST"])
 @login_required
+@budgets.budget_guard
 def stream_message(conversation_id: int):
     """Stream an assistant reply using Server-Sent Events.
 
@@ -924,6 +929,7 @@ def stream_message(conversation_id: int):
         db.session.rollback()
         return jsonify({"error": error}), 400
     db.session.commit()
+    realtime.broadcast_message(conversation, user_message, sender=current_user)
     messages = _conversation_messages(conversation, context_messages)
     generation = _generation_kwargs(conversation)
 
@@ -942,6 +948,7 @@ def stream_message(conversation_id: int):
         # One ledger row per persisted reply (streamed, cancelled or fallback).
         _record_chat_ledger(conversation, usage)
         db.session.commit()
+        realtime.broadcast_message(conversation, message)
         return message
 
     def stream_usage(reply: str) -> dict:

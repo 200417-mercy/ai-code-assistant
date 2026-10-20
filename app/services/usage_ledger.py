@@ -13,7 +13,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 
 from app.extensions import db
 from app.models import Message, UsageRecord
@@ -57,6 +57,15 @@ DEFAULT_RETENTION_DAYS = 365
 
 #: Smallest allowed retention window, so a purge can never target "today".
 MIN_RETENTION_DAYS = 1
+
+#: Version of the JSON usage export document. Increment when a field changes
+#: meaning or is removed; additive fields do not require a bump.
+EXPORT_SCHEMA_VERSION = 1
+
+#: Default and maximum page sizes for the JSON usage export. The export is
+#: deliberately bounded even when the ledger is large.
+EXPORT_DEFAULT_LIMIT = 100
+EXPORT_MAX_LIMIT = 500
 
 
 def normalize_source(source: Any) -> str | None:
@@ -225,7 +234,10 @@ def record_usage(
 
     # Scope objects take precedence over their explicit id counterparts.
     resolved_workspace_id = (
-        _object_id(workspace) or workspace_id or _object_id(project, "workspace_id")
+        _object_id(workspace)
+        or workspace_id
+        or _object_id(project, "workspace_id")
+        or _object_id(conversation, "workspace_id")
     )
     resolved_user_id = _object_id(user) or user_id
     resolved_project_id = _object_id(project) or project_id
@@ -266,6 +278,14 @@ def record_usage(
         status=status,
     )
     db.session.add(record)
+
+    # Budget warnings are evaluated against the ledger itself. The call is
+    # inside the same transaction so a warning notification commits with the
+    # usage row; accounting never fails because of budget evaluation.
+    from app.services import budgets
+
+    budgets.after_usage_recorded(record)
+
     if commit:
         db.session.commit()
     return record
@@ -297,14 +317,14 @@ def summarize_records(records) -> dict:
     return summary
 
 
-def query_records(
+def filtered_records_query(
     *,
     user_id=None,
     workspace_id=None,
     project_id=None,
     source=None,
-) -> list[UsageRecord]:
-    """Fetch ledger rows with optional owner/scope filters."""
+):
+    """Return the base query for rows matching optional owner/scope filters."""
     query = UsageRecord.query
     if user_id is not None:
         query = query.filter(UsageRecord.user_id == user_id)
@@ -313,8 +333,127 @@ def query_records(
     if project_id is not None:
         query = query.filter(UsageRecord.project_id == project_id)
     if source is not None:
-        query = query.filter(UsageRecord.source == normalize_source(source))
+        normalized = normalize_source(source)
+        if normalized is not None:
+            query = query.filter(UsageRecord.source == normalized)
+    return query
+
+
+def query_records(
+    *,
+    user_id=None,
+    workspace_id=None,
+    project_id=None,
+    source=None,
+) -> list[UsageRecord]:
+    """Fetch ledger rows with optional owner/scope filters."""
+    query = filtered_records_query(
+        user_id=user_id,
+        workspace_id=workspace_id,
+        project_id=project_id,
+        source=source,
+    )
     return query.order_by(UsageRecord.created_at, UsageRecord.id).all()
+
+
+def summarize_query(query) -> dict:
+    """Aggregate the rows matched by a filtered ledger query.
+
+    Uses SQL aggregates so an export can report totals for the full filtered
+    set without loading every row into memory. The returned shape matches
+    :func:`summarize_records`.
+    """
+    count = query.count()
+    prompt_tokens = query.with_entities(
+        func.coalesce(func.sum(UsageRecord.prompt_tokens), 0)
+    ).scalar()
+    completion_tokens = query.with_entities(
+        func.coalesce(func.sum(UsageRecord.completion_tokens), 0)
+    ).scalar()
+    total_tokens = query.with_entities(
+        func.coalesce(func.sum(UsageRecord.total_tokens), 0)
+    ).scalar()
+    cost_estimate = query.with_entities(
+        func.coalesce(func.sum(UsageRecord.cost_estimate), 0.0)
+    ).scalar()
+    priced_records = query.filter(UsageRecord.cost_estimate.isnot(None)).count()
+    estimated_records = query.filter(UsageRecord.tokens_estimated.is_(True)).count()
+    return {
+        "count": int(count),
+        "prompt_tokens": int(prompt_tokens or 0),
+        "completion_tokens": int(completion_tokens or 0),
+        "total_tokens": int(total_tokens or 0),
+        "cost_estimate": pricing.round_cost(float(cost_estimate or 0.0)),
+        "priced_records": int(priced_records),
+        "estimated_records": int(estimated_records),
+    }
+
+
+def export_payload(
+    *,
+    user_id,
+    workspace_id=None,
+    project_id=None,
+    source=None,
+    page=1,
+    limit=EXPORT_DEFAULT_LIMIT,
+    exported_at: datetime | None = None,
+) -> dict:
+    """Build a bounded, paginated JSON export for one user's ledger rows.
+
+    The user scope is mandatory and always applied first, so optional
+    workspace/project/source filters can only narrow the caller's own data.
+    Invalid page/limit values are clamped to the same bounds as the plugin
+    listing (page >= 1, 1 <= limit <= :data:`EXPORT_MAX_LIMIT`) rather than
+    producing an unbounded response.
+
+    ``totals`` covers every row matching the filters; ``page_totals`` covers
+    only the returned page. Records are serialized with
+    :meth:`~app.models.UsageRecord.to_dict`, so field names stay identical to
+    the rest of the usage APIs.
+    """
+    page = page if isinstance(page, int) and page >= 1 else 1
+    if not isinstance(limit, int) or limit < 1:
+        limit = EXPORT_DEFAULT_LIMIT
+    limit = min(limit, EXPORT_MAX_LIMIT)
+
+    normalized_source = normalize_source(source)
+    query = filtered_records_query(
+        user_id=user_id,
+        workspace_id=workspace_id,
+        project_id=project_id,
+        source=normalized_source,
+    )
+    totals = summarize_query(query)
+    total = totals["count"]
+    pages = (total + limit - 1) // limit if total else 0
+    offset = (page - 1) * limit
+    records = (
+        query.order_by(UsageRecord.created_at, UsageRecord.id).offset(offset).limit(limit).all()
+    )
+    page_totals = summarize_records(records)
+
+    return {
+        "schema_version": EXPORT_SCHEMA_VERSION,
+        "exported_at": (exported_at or datetime.now(UTC)).isoformat(),
+        "filters": {
+            "workspace_id": workspace_id,
+            "project_id": project_id,
+            "source": normalized_source,
+        },
+        "pagination": {
+            "page": page,
+            "limit": limit,
+            "max_limit": EXPORT_MAX_LIMIT,
+            "total": total,
+            "pages": pages,
+            "has_next": page < pages,
+            "has_prev": page > 1,
+        },
+        "totals": totals,
+        "page_totals": page_totals,
+        "records": [record.to_dict() for record in records],
+    }
 
 
 def breakdown_by_source(
@@ -603,6 +742,9 @@ __all__ = [
     "BACKFILL_MAX_BATCH_SIZE",
     "BACKFILL_REQUEST_PREFIX",
     "DEFAULT_RETENTION_DAYS",
+    "EXPORT_DEFAULT_LIMIT",
+    "EXPORT_MAX_LIMIT",
+    "EXPORT_SCHEMA_VERSION",
     "MIN_RETENTION_DAYS",
     "SOURCES",
     "SOURCE_ANALYSIS",
@@ -619,6 +761,8 @@ __all__ = [
     "breakdown_payload",
     "current_provider_metadata",
     "estimate_cost",
+    "export_payload",
+    "filtered_records_query",
     "normalize_source",
     "normalize_usage",
     "purge_records",
@@ -626,5 +770,6 @@ __all__ = [
     "record_usage",
     "retention_days_from_config",
     "source_bucket",
+    "summarize_query",
     "summarize_records",
 ]

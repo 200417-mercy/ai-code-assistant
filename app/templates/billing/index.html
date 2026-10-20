@@ -4,6 +4,85 @@
 
 {% block content %}
 <h1>Provider billing reconciliation</h1>
+
+<section aria-labelledby="budgets-heading">
+  <h2 id="budgets-heading">Budgets &amp; quotas</h2>
+  <p>
+    Set a monthly token limit, a cost limit, or both. Calls are refused before
+    the provider is invoked when a limit is reached; a warning is emitted at the
+    configured threshold. User budgets apply to you everywhere; workspace
+    budgets apply to work filed under that workspace.
+  </p>
+
+  <form id="budget-form" class="budget-form">
+    <div class="settings-field">
+      <label for="budget-scope">Scope</label>
+      <select id="budget-scope" name="scope">
+        <option value="user">My account</option>
+        <option value="workspace">Workspace</option>
+      </select>
+    </div>
+    <div class="settings-field" id="budget-workspace-field" hidden>
+      <label for="budget-workspace">Workspace</label>
+      <select id="budget-workspace" name="workspace_id">
+        {% for workspace in workspaces %}
+        <option value="{{ workspace.id }}">{{ workspace.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="settings-field">
+      <label for="budget-tokens">Token limit (blank to disable)</label>
+      <input id="budget-tokens" name="token_limit" type="number" min="0" step="1" inputmode="numeric">
+    </div>
+    <div class="settings-field">
+      <label for="budget-cost">Cost limit (blank to disable)</label>
+      <input id="budget-cost" name="cost_limit" type="number" min="0" step="0.000001" inputmode="decimal">
+    </div>
+    <div class="settings-field">
+      <label for="budget-threshold">Warning threshold (0&ndash;1)</label>
+      <input id="budget-threshold" name="warn_threshold" type="number" min="0.01" max="1" step="0.05" value="0.8">
+    </div>
+    <button class="btn btn-primary" type="submit">Save budget</button>
+  </form>
+  <p id="budget-error" class="composer-error" role="alert" hidden></p>
+
+  <table class="billing-table" aria-label="Configured budgets">
+    <thead>
+      <tr>
+        <th scope="col">Scope</th>
+        <th scope="col">Tokens</th>
+        <th scope="col">Cost</th>
+        <th scope="col">Status</th>
+        <th scope="col"><span class="visually-hidden">Actions</span></th>
+      </tr>
+    </thead>
+    <tbody id="budget-rows">
+      {% for budget in budgets %}
+      <tr data-budget-id="{{ budget.id }}">
+        <td>{{ budget.scope }}{% if budget.scope == 'workspace' %} #{{ budget.scope_id }}{% endif %}</td>
+        <td>
+          {{ '{:,}'.format(budget.tokens_used) }}
+          {% if budget.token_limit is not none %}/ {{ '{:,}'.format(budget.token_limit) }}{% else %}<span class="chat-hint">no limit</span>{% endif %}
+        </td>
+        <td>
+          {{ '%.4f'|format(budget.cost_used) }}
+          {% if budget.cost_limit is not none %}/ {{ '%.4f'|format(budget.cost_limit) }}{% else %}<span class="chat-hint">no limit</span>{% endif %}
+        </td>
+        <td>
+          {% if budget.limits_hit %}Blocked ({{ budget.limits_hit|join(', ') }})
+          {% elif budget.warned %}Warning
+          {% else %}OK{% endif %}
+        </td>
+        <td><button class="btn btn-ghost btn-sm budget-delete" type="button" data-budget-id="{{ budget.id }}">Delete</button></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% if not budgets %}
+  <p class="sidebar-empty" id="budget-empty">No budgets configured.</p>
+  {% endif %}
+</section>
+
 <p>
   Import the amount your LLM provider reported for a month (a CSV with
   <code>provider</code>, <code>period</code> as <code>YYYY-MM</code>, and
@@ -55,4 +134,8 @@
   <p class="sidebar-empty">No provider billing imported yet.</p>
   {% endif %}
 </section>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/billing_budgets.js') }}"></script>
 {% endblock %}

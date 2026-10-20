@@ -9,6 +9,7 @@ Machine-facing REST surface for the chat feature:
     DELETE /api/conversations/<id>                 delete (cascade)
     GET    /api/usage                              per-user token usage summary
     GET    /api/usage/breakdown                    usage and cost by source
+    GET    /api/usage/export                       bounded JSON usage export
 
 All routes require authentication and are owner-scoped. Errors use RFC 7807
 (``application/problem+json``) documents so API clients never receive HTML error
@@ -25,9 +26,10 @@ from flask import Blueprint, current_app, jsonify, request
 from flask_login import current_user
 
 from app.chat import routes as chat_routes
+from app.collaboration import realtime
 from app.extensions import db
 from app.models import Conversation, Message
-from app.services import ratelimit, streaming, usage_ledger
+from app.services import budgets, ratelimit, streaming, usage_ledger
 from app.services.currency import get_currency_config
 from app.services.llm import LLMProviderError, provider_status
 from app.services.provider_config import ProviderSettingsError, apply_settings, build_provider
@@ -200,6 +202,7 @@ def delete_conversation(conversation_id: int):
 
 @bp.route("/conversations/<int:conversation_id>/messages", methods=["POST"])
 @_login_required
+@budgets.budget_guard
 @ratelimit.ai_limit
 @_rate_limit("message")
 def send_message(conversation_id: int):
@@ -278,6 +281,8 @@ def send_message(conversation_id: int):
     if conversation.title == "New conversation":
         conversation.title = content.strip()[:60] or "New conversation"
     db.session.commit()
+    realtime.broadcast_message(conversation, user_message, sender=current_user)
+    realtime.broadcast_message(conversation, assistant_message)
     if request.accept_mimetypes.best == "text/event-stream":
         response = current_app.response_class(
             _stream_reply(conversation, completion.content),
@@ -329,6 +334,46 @@ def usage_breakdown():
         user_id=current_user.id,
         workspace_id=workspace_id,
         project_id=project_id,
+    )
+    payload["currency"] = get_currency_config()
+    payload["cost_is_estimate"] = True
+    return jsonify(payload)
+
+
+@bp.route("/usage/export", methods=["GET"])
+@_login_required
+@_rate_limit("usage")
+def usage_export():
+    """Export the current user's usage ledger as bounded, paginated JSON.
+
+    The authenticated user is always the outer scope: ``workspace_id``,
+    ``project_id`` and ``source`` only narrow that user's own records and can
+    never expose another account's usage. ``page`` and ``limit`` are clamped to
+    the same bounds as the marketplace listing (page >= 1, limit 1-500), and
+    invalid values fall back to the defaults rather than returning an unbounded
+    document.
+
+    The payload includes ``schema_version``, ``exported_at``, the applied
+    ``filters``, ``pagination`` metadata, ledger ``totals`` (plus per-page
+    ``page_totals``), and ``records`` serialized with ``UsageRecord.to_dict``.
+    Only metadata and token/cost counts are exported; prompts and completions
+    are never stored in the ledger.
+    """
+    page = request.args.get("page", type=int)
+    if page is None or page < 1:
+        page = 1
+    limit = request.args.get("limit", type=int)
+    if limit is None:
+        limit = usage_ledger.EXPORT_DEFAULT_LIMIT
+    limit = max(1, min(limit, usage_ledger.EXPORT_MAX_LIMIT))
+
+    payload = usage_ledger.export_payload(
+        user_id=current_user.id,
+        workspace_id=request.args.get("workspace_id", type=int),
+        project_id=request.args.get("project_id", type=int),
+        source=request.args.get("source"),
+        page=page,
+        limit=limit,
     )
     payload["currency"] = get_currency_config()
     payload["cost_is_estimate"] = True

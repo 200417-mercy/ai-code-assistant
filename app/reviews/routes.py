@@ -38,7 +38,7 @@ from app.models.review import (
 )
 from app.models.review_finding import CATEGORIES_BY_KIND, SEVERITIES
 from app.reviews import bp
-from app.services import chat_audit, usage_ledger
+from app.services import budgets, chat_audit, usage_ledger
 from app.services import metrics as metrics_service
 from app.services import reviews as reviews_service
 from app.services.events import emit_event
@@ -272,6 +272,7 @@ def api_list_reviews():
 
 @bp.route("/api/reviews", methods=["POST"])
 @login_required
+@budgets.budget_guard
 def api_create_review():
     """Run a new review (GitHub pull request or imported project)."""
     data = request.get_json(silent=True) or {}
@@ -446,6 +447,7 @@ def _save_result(review: Review, result: dict, config: dict) -> None:
 
 @bp.route("/api/reviews/<int:review_id>/retry", methods=["POST"])
 @login_required
+@budgets.budget_guard
 def api_retry_review(review_id: int):
     """Retry a failed review run, reusing its stored configuration snapshot.
 
