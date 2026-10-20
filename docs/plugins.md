@@ -263,7 +263,12 @@ management operations.
 | `POST` | `/plugins/api/workspaces/<id>/plugins/<plugin_id>/disable` | Disable the workspace installation | owner |
 | `POST` | `/plugins/api/workspaces/<id>/plugins/<plugin_id>/capabilities` | Explicitly grant/revoke capabilities (`{"grant": [...], "revoke": [...]}`) | owner |
 
-### Installation (trusted/local only)
+### Installation (local manifests or signed catalog entries)
+
+Local manifests are the default. Remote installation is supported only through
+the operator-controlled catalog described in
+[Remote install from the validated catalog](#remote-install-from-the-validated-catalog-389);
+the API never accepts a client-supplied artifact URL.
 
 `POST .../plugins/install` accepts a manifest object (`{"manifest": {...}}`).
 The manifest is fully validated (`PluginManifest.from_dict`); malformed
@@ -384,6 +389,29 @@ workspace `PluginInstallation`. The response also reports the catalog `source`
 and `integrity` so the resolved pin is visible. It does **not** download the
 artifact, execute plugin code, or create capability grants, and trust refusals
 are appended to the workspace audit trail.
+
+### Marketplace trust model (end to end)
+
+The operator-facing summary lives in
+[the security model](security.md#marketplace-trust-model). In short: the
+catalog source is allowlisted, every entry is schema/integrity/signature
+checked, installs are owner-only and dependency-validated, updates are atomic
+with rollback, and the lockfile pins the resolved set. Catalog data is
+advertised metadata only — it never executes and never grants a capability.
+
+| Concern | Implementation | Tests |
+| ------- | -------------- | ----- |
+| Catalog parsing, id/version/source/integrity validation | `app/services/plugin_catalog.py` | `tests/test_plugin_catalog_install.py`, `tests/test_plugin_catalog_remote.py`, `tests/test_plugin_catalog_deps.py` |
+| Read-only discovery + manifest-schema validation | `app/services/marketplace.py`, `app/plugins/routes.py` | `tests/test_marketplace_catalog.py` |
+| Allowlist / HTTPS / timeout / size / no redirects | `app/services/plugin_network.py` | `tests/test_plugin_network.py` |
+| Ed25519 signatures and trust policy | `app/services/plugin_signatures.py`, `app/services/plugin_trust.py` | `tests/test_plugin_signatures.py`, `tests/test_plugin_trust.py` |
+| Transitive dependency resolution and cycles | `app/services/plugin_deps.py` | `tests/test_plugin_catalog_deps.py`, `tests/test_plugin_deps.py` |
+| Atomic update / rollback | `app/services/plugin_ops.py`, `app/services/plugin_updates.py` | `tests/test_plugin_update.py`, `tests/test_marketplace_e2e.py` |
+| Lockfile pinning and serialization | `app/models/plugin*.py`, `app/services/plugin_lockfile.py` | `tests/test_plugin_lock_entries.py`, `tests/test_plugin_lockfile.py` |
+
+Configuration for each layer is in the
+[configuration reference](#configuration-reference); remote installation stays
+disabled until an operator sets a catalog and allowlist.
 
 ### Marketplace catalog schema (#373)
 
@@ -755,8 +783,11 @@ The foundation is intentionally small. Planned, contributor-friendly work is
 tracked under the **Phase 8 - Plugins & Extensions** milestone (label
 `phase-8`), for example:
 
-- Dependency resolution and version compatibility checks.
-- Plugin packaging/distribution and a marketplace.
+- Dependency resolution and version compatibility checks (implemented — see
+  `app/services/plugin_deps.py` and `app/services/plugin_compat.py`).
+- Plugin packaging/distribution and a marketplace (implemented — signed,
+  catalog-pinned installs plus the read-only discovery API; see
+  [Marketplace trust model](#marketplace-trust-model-end-to-end)).
 - CLI commands for plugin management.
 - A capability audit trail (implemented).
 - A plugin development guide and an example plugin (implemented — see
