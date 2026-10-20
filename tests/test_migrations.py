@@ -127,7 +127,7 @@ class TestMigrationHead:
         result = _run_flask(["db", "heads"], {"DATABASE_URL": "sqlite:///:memory:"})
         assert result.returncode == 0, result.stderr
         output = result.stdout + result.stderr
-        assert "f0a1b2c3d4e5" in output
+        assert "b7d8e9f0a1c2" in output
         # The merge revision must be the single head (no dangling branches).
         head_lines = [line for line in output.splitlines() if "(head)" in line]
         assert len(head_lines) == 1
