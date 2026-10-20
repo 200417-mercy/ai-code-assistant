@@ -989,6 +989,18 @@ def api_rollback_plugin(workspace_id: int, plugin_id: str):
         return jsonify({"error": str(exc)}), 400
     except (CatalogUnavailableError, CatalogError) as exc:
         db.session.rollback()
+        if lock_entry is None:
+            return (
+                jsonify(
+                    {
+                        "error": (
+                            "No lockfile history is available for this plugin "
+                            f"and no catalog fallback is usable: {exc}"
+                        )
+                    }
+                ),
+                404,
+            )
         return jsonify({"error": str(exc)}), 404
 
     record_plugin_audit(
