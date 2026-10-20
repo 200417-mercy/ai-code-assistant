@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+
+{% block title %}Usage &amp; Cost - {{ config.APP_NAME }}{% endblock %}
+
+{% block content %}
+<h1>Usage &amp; cost</h1>
+<p>
+  Every figure on this page is computed from stored usage-ledger rows. Cost is an
+  <strong>estimate</strong> based on the configured price table; rows without a
+  known price are excluded from the cost total rather than treated as zero.
+</p>
+
+<form method="get" action="{{ url_for('billing.usage_page') }}" class="inline-form">
+  <label for="days">Window (days)</label>
+  <input id="days" name="days" type="number" min="1" max="365" value="{{ days }}">
+  {% if workspaces %}
+  <label for="workspace_id">Scope</label>
+  <select id="workspace_id" name="workspace_id">
+    <option value="">My usage</option>
+    {% for workspace in workspaces %}
+    <option value="{{ workspace.id }}" {% if workspace_id == workspace.id %}selected{% endif %}>
+      {{ workspace.name }}
+    </option>
+    {% endfor %}
+  </select>
+  {% endif %}
+  <button class="btn" type="submit">Apply</button>
+</form>
+
+<p>
+  <a class="btn"
+     href="{% if workspace_id %}{{ url_for('billing.api_workspace_usage_csv', workspace_id=workspace_id, days=days) }}{% else %}{{ url_for('billing.api_usage_dashboard_csv', days=days) }}{% endif %}">
+    Download CSV
+  </a>
+</p>
+
+<section aria-labelledby="totals-heading">
+  <h2 id="totals-heading">Totals</h2>
+  <div class="metric-grid">
+    <div class="metric"><span class="metric-label">Total tokens</span><strong>{{ dashboard.totals.total_tokens }}</strong></div>
+    <div class="metric"><span class="metric-label">Prompt tokens</span><strong>{{ dashboard.totals.prompt_tokens }}</strong></div>
+    <div class="metric"><span class="metric-label">Completion tokens</span><strong>{{ dashboard.totals.completion_tokens }}</strong></div>
+    <div class="metric"><span class="metric-label">Operations</span><strong>{{ dashboard.totals['count'] }}</strong></div>
+    <div class="metric"><span class="metric-label">Estimated cost</span><strong>{{ dashboard.currency.symbol }}{{ '%.6f'|format(dashboard.totals.cost_estimate) }}</strong></div>
+  </div>
+  <p class="sidebar-empty">
+    {{ dashboard.totals.priced_records }} of {{ dashboard.totals['count'] }} operations have a known price.
+  </p>
+</section>
+
+{% macro breakdown_table(title, rows, label) %}
+<section aria-labelledby="{{ title|lower|replace(' ', '-') }}-heading">
+  <h2 id="{{ title|lower|replace(' ', '-') }}-heading">{{ title }}</h2>
+  {% if rows %}
+  <table class="billing-table">
+    <thead>
+      <tr>
+        <th scope="col">{{ label }}</th>
+        <th scope="col">Operations</th>
+        <th scope="col">Prompt</th>
+        <th scope="col">Completion</th>
+        <th scope="col">Total tokens</th>
+        <th scope="col">Estimated cost</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in rows %}
+      <tr>
+        <td>{{ row[label|lower] }}</td>
+        <td>{{ row['count'] }}</td>
+        <td>{{ row.prompt_tokens }}</td>
+        <td>{{ row.completion_tokens }}</td>
+        <td>{{ row.total_tokens }}</td>
+        <td>{{ dashboard.currency.symbol }}{{ '%.6f'|format(row.cost_estimate) }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="sidebar-empty">No usage in this window.</p>
+  {% endif %}
+</section>
+{% endmacro %}
+
+{{ breakdown_table('By provider', dashboard.by_provider, 'Provider') }}
+{{ breakdown_table('By model', dashboard.by_model, 'Model') }}
+{{ breakdown_table('By source', dashboard.by_source, 'Source') }}
+
+<section aria-labelledby="daily-heading">
+  <h2 id="daily-heading">Daily time series</h2>
+  {% if dashboard.daily %}
+  <table class="billing-table">
+    <thead>
+      <tr>
+        <th scope="col">Date</th>
+        <th scope="col">Operations</th>
+        <th scope="col">Prompt</th>
+        <th scope="col">Completion</th>
+        <th scope="col">Total tokens</th>
+        <th scope="col">Estimated cost</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in dashboard.daily %}
+      <tr>
+        <td>{{ row.date }}</td>
+        <td>{{ row['count'] }}</td>
+        <td>{{ row.prompt_tokens }}</td>
+        <td>{{ row.completion_tokens }}</td>
+        <td>{{ row.total_tokens }}</td>
+        <td>{{ dashboard.currency.symbol }}{{ '%.6f'|format(row.cost_estimate) }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="sidebar-empty">No usage in this window.</p>
+  {% endif %}
+</section>
+{% endblock %}
+
