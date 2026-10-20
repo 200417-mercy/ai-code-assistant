@@ -272,9 +272,7 @@ def usage_page():
     if days is None:
         days = usage_dashboards.DEFAULT_WINDOW_DAYS
     workspace_id = request.args.get("workspace_id", type=int)
-    if workspace_id is not None and not can_access_workspace_billing(
-        workspace_id, current_user
-    ):
+    if workspace_id is not None and not can_access_workspace_billing(workspace_id, current_user):
         abort(404)
     payload = usage_dashboards.dashboard(
         user_id=current_user.id, workspace_id=workspace_id, days=days
