@@ -14,10 +14,10 @@ instance with the ``testing`` configuration).
 import os
 from datetime import datetime
 
-from flask import Flask, render_template
+from flask import Flask, g, render_template
 
 from app.config import config_by_name
-from app.extensions import csrf, db, login_manager, migrate
+from app.extensions import csrf, db, login_manager, migrate, socketio
 
 
 def create_app(config_name: str | None = None) -> Flask:
@@ -46,6 +46,17 @@ def create_app(config_name: str | None = None) -> Flask:
     migrate.init_app(app, db)
     login_manager.init_app(app)
     csrf.init_app(app)
+
+    # Real-time collaboration over WebSockets (issue #50). ``manage_session``
+    # lets socket handlers reuse the Flask-Login session, so room joins are
+    # authorized with the same identity as HTTP routes.
+    allowed_origins = app.config.get("SOCKETIO_CORS_ALLOWED_ORIGINS") or None
+    socketio.init_app(
+        app,
+        async_mode=app.config.get("SOCKETIO_ASYNC_MODE", "threading"),
+        cors_allowed_origins=allowed_origins,
+        manage_session=True,
+    )
 
     # Structured, security-relevant chat logging + request-id correlation (#17).
     from app.services import chat_audit
@@ -94,6 +105,17 @@ def create_app(config_name: str | None = None) -> Flask:
     app.register_blueprint(stellar_bp)
     app.register_blueprint(billing_bp)
     app.register_blueprint(admin_bp)
+
+    # Register Socket.IO event handlers (import has side effects by design).
+    from app.collaboration import realtime  # noqa: F401
+
+    @app.after_request
+    def add_budget_warning_header(response):
+        """Expose a non-blocking budget warning to API/UI clients."""
+        decision = getattr(g, "budget_decision", None)
+        if decision is not None and getattr(decision, "warned", False):
+            response.headers["X-Budget-Warning"] = "approaching_limit"
+        return response
 
     # Make the current time available to every template as ``now``.
     @app.context_processor

@@ -15,7 +15,7 @@ from werkzeug.utils import secure_filename
 
 from app.extensions import db
 from app.models import AnalyzedFile, Conversation, FileAnalysis, Message
-from app.services import analysis, ratelimit, token_usage, usage_ledger
+from app.services import analysis, budgets, ratelimit, token_usage, usage_ledger
 from app.services.github import (
     GitHubError,
     get_github_client,
@@ -213,6 +213,7 @@ def _run_action(
 
 @bp.route("/generate", methods=["POST"])
 @login_required
+@budgets.budget_guard
 @ratelimit.ai_limit
 def generate():
     """Generate code from a natural-language request."""
@@ -234,6 +235,7 @@ def generate():
 
 @bp.route("/code", methods=["POST"])
 @login_required
+@budgets.budget_guard
 @ratelimit.ai_limit
 def code_action():
     """Run a code action (explain/refactor/bugs/optimize/comments/docs/commit)."""
@@ -257,6 +259,7 @@ def code_action():
 
 @bp.route("/analyze", methods=["POST"])
 @login_required
+@budgets.budget_guard
 @ratelimit.ai_limit
 def analyze_file():
     """Upload a source file and run an AI analysis over its contents.
@@ -383,6 +386,7 @@ def delete_file_analysis(analysis_id: int):
 
 @bp.route("/soroban/skeleton", methods=["POST"])
 @login_required
+@budgets.budget_guard
 @ratelimit.ai_limit
 def soroban_skeleton():
     """Generate a labeled Soroban contract skeleton from a description (#187).
@@ -494,6 +498,7 @@ def _select_entry_points(paths: list[str]) -> list[str]:
 
 @bp.route("/repo-analyze", methods=["POST"])
 @login_required
+@budgets.budget_guard
 @ratelimit.ai_limit
 def repo_analyze():
     """Dedicated repository-analysis tool: structure, dependencies, entry points.

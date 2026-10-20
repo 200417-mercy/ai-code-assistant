@@ -127,7 +127,7 @@ class TestMigrationHead:
         result = _run_flask(["db", "heads"], {"DATABASE_URL": "sqlite:///:memory:"})
         assert result.returncode == 0, result.stderr
         output = result.stdout + result.stderr
-        assert "b7d8e9f0a1c2" in output
+        assert "b7c8d9e0f1a2" in output
         # The merge revision must be the single head (no dangling branches).
         head_lines = [line for line in output.splitlines() if "(head)" in line]
         assert len(head_lines) == 1
@@ -149,6 +149,37 @@ class TestMigrationHead:
             assert "workspace_price_overrides" in tables
             columns = {col["name"] for col in insp.get_columns("workspace_price_overrides")}
             assert columns == expected
+
+    def test_budgets_table_upgraded(self):
+        expected = {
+            "id",
+            "user_id",
+            "workspace_id",
+            "period",
+            "token_limit",
+            "cost_limit",
+            "warn_threshold",
+            "is_active",
+            "created_by_id",
+            "created_at",
+            "updated_at",
+        }
+        with _migration_db() as db_url, _inspect(db_url) as insp:
+            assert "budgets" in set(insp.get_table_names())
+            columns = {col["name"] for col in insp.get_columns("budgets")}
+            assert columns == expected
+
+    def test_budgets_downgrade_removed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_url = f"sqlite:///{os.path.join(tmp, 'mig_budgets.db')}"
+            up = _run_flask(["db", "upgrade"], {"DATABASE_URL": db_url})
+            assert up.returncode == 0, up.stderr
+            down = _run_flask(
+                ["db", "downgrade", "f0a1b2c3d4e5"], {"DATABASE_URL": db_url}
+            )
+            assert down.returncode == 0, down.stderr
+            with _inspect(db_url) as insp:
+                assert "budgets" not in set(insp.get_table_names())
 
     def test_workspace_price_overrides_downgrade_removed(self):
         with tempfile.TemporaryDirectory() as tmp:

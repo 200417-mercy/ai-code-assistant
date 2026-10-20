@@ -120,6 +120,12 @@ class Config:
     # overwritten by an import.
     BILLING_IMPORT_MAX_BYTES = int(os.getenv("BILLING_IMPORT_MAX_BYTES", str(1024 * 1024)))
     BILLING_IMPORT_MAX_ROWS = int(os.getenv("BILLING_IMPORT_MAX_ROWS", "5000"))
+    # Budget enforcement (Phase 10). When enabled, a user/workspace budget is
+    # evaluated before every LLM call. Calls fail closed when a limit is
+    # reached; evaluation errors also block rather than allowing unbounded
+    # spend. The default warning threshold is applied to new budgets.
+    BUDGET_ENFORCEMENT_ENABLED = os.getenv("BUDGET_ENFORCEMENT_ENABLED", "1") == "1"
+    BUDGET_DEFAULT_WARN_THRESHOLD = float(os.getenv("BUDGET_DEFAULT_WARN_THRESHOLD", "0.8"))
     # Display currency for every cost figure (issue #441). Defaults to USD; the
     # code is always shown next to the symbol so a figure is never ambiguous.
     # Operators that change the code are responsible for keeping the configured
@@ -293,6 +299,11 @@ class Config:
     RATE_LIMIT_AI_PER_MINUTE = int(os.getenv("RATE_LIMIT_AI_PER_MINUTE", "60"))
     RATE_LIMIT_AI_WINDOW = int(os.getenv("RATE_LIMIT_AI_WINDOW", "60"))
     RATE_LIMIT_AI_ENABLED = True
+    # Real-time collaboration (issue #50). ``threading`` keeps the development
+    # server and tests dependency-free; production may use ``eventlet`` or
+    # ``gevent`` when those are installed. Same-origin only by default.
+    SOCKETIO_ASYNC_MODE = os.getenv("SOCKETIO_ASYNC_MODE", "threading")
+    SOCKETIO_CORS_ALLOWED_ORIGINS = os.getenv("SOCKETIO_CORS_ALLOWED_ORIGINS", "")
     # Usage-ledger retention (#435): rows older than this many days may be
     # purged with ``flask usage purge``. Rows newer than the window are never
     # removed, and the window is bounded to at least one day.

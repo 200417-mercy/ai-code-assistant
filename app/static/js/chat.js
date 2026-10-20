@@ -144,9 +144,12 @@
     );
   }
 
-  function addMessage(role, content, attachments, usage) {
+  function addMessage(role, content, attachments, usage, messageId) {
     var el = document.createElement("div");
     el.className = "chat-message chat-" + role;
+    if (messageId !== undefined && messageId !== null) {
+      el.dataset.messageId = messageId;
+    }
     var label = role === "user" ? "You" : "Assistant";
     var body =
       '<div class="message-header">' +
@@ -349,7 +352,13 @@
     return api("/chat/conversations/" + id)
       .then(function (data) {
         data.messages.forEach(function (message) {
-          addMessage(message.role, message.content, message.attachments, message.token_usage);
+          addMessage(
+            message.role,
+            message.content,
+            message.attachments,
+            message.token_usage,
+            message.id
+          );
         });
         conversationUsage =
           data.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
@@ -363,6 +372,9 @@
         clearComposerError();
         autoGrowComposer();
         inputEl.focus();
+        document.dispatchEvent(
+          new CustomEvent("conversation:changed", { detail: { id: currentId } })
+        );
       })
       .catch(function (error) {
         flashError(error.message);
@@ -392,6 +404,9 @@
 
   function newConversation() {
     currentId = null;
+    document.dispatchEvent(
+      new CustomEvent("conversation:changed", { detail: { id: null } })
+    );
     messagesEl.innerHTML = '<div class="chat-placeholder"><p>Start a new conversation.</p></div>';
     actionsEl.hidden = true;
     conversationUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
@@ -477,6 +492,9 @@
     addListItem(created);
     currentId = created.id;
     actionsEl.hidden = false;
+    document.dispatchEvent(
+      new CustomEvent("conversation:changed", { detail: { id: currentId } })
+    );
     return currentId;
   }
 
@@ -642,6 +660,9 @@
             flashError(payload.error);
           } else if (payload.type === "done") {
             if (payload.message) {
+              if (payload.message.id !== undefined) {
+                typing.dataset.messageId = payload.message.id;
+              }
               streamBody.innerHTML =
                 renderMarkdown(payload.message.content) +
                 renderAttachments(payload.message.attachments);
@@ -1246,6 +1267,36 @@
       }
     });
   });
+
+  // Bridge used by chat_realtime.js (issue #50) to render events without
+  // duplicating the chat module's rendering logic.
+  window.AIChatBridge = {
+    getCurrentId: function () {
+      return currentId;
+    },
+    isStreaming: function () {
+      return streaming;
+    },
+    renderRemoteMessage: function (message) {
+      if (!message || currentId === null) return false;
+      if (message.id !== undefined && message.id !== null) {
+        var existing = messagesEl.querySelector(
+          '.chat-message[data-message-id="' + String(message.id) + '"]'
+        );
+        if (existing) return false;
+      }
+      var placeholder = messagesEl.querySelector(".chat-placeholder");
+      if (placeholder) placeholder.remove();
+      addMessage(
+        message.role,
+        message.content,
+        message.attachments,
+        message.token_usage,
+        message.id
+      );
+      return true;
+    },
+  };
 
   // Test seam: expose the pure client helpers so the frontend unit tests can
   // exercise them under jsdom without a browser. This is deliberately small and

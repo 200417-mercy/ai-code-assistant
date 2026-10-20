@@ -26,9 +26,10 @@ from flask import Blueprint, current_app, jsonify, request
 from flask_login import current_user
 
 from app.chat import routes as chat_routes
+from app.collaboration import realtime
 from app.extensions import db
 from app.models import Conversation, Message
-from app.services import ratelimit, streaming, usage_ledger
+from app.services import budgets, ratelimit, streaming, usage_ledger
 from app.services.currency import get_currency_config
 from app.services.llm import LLMProviderError, provider_status
 from app.services.provider_config import ProviderSettingsError, apply_settings, build_provider
@@ -201,6 +202,7 @@ def delete_conversation(conversation_id: int):
 
 @bp.route("/conversations/<int:conversation_id>/messages", methods=["POST"])
 @_login_required
+@budgets.budget_guard
 @ratelimit.ai_limit
 @_rate_limit("message")
 def send_message(conversation_id: int):
@@ -279,6 +281,8 @@ def send_message(conversation_id: int):
     if conversation.title == "New conversation":
         conversation.title = content.strip()[:60] or "New conversation"
     db.session.commit()
+    realtime.broadcast_message(conversation, user_message, sender=current_user)
+    realtime.broadcast_message(conversation, assistant_message)
     if request.accept_mimetypes.best == "text/event-stream":
         response = current_app.response_class(
             _stream_reply(conversation, completion.content),
