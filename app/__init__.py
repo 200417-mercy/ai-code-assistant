@@ -73,6 +73,12 @@ def create_app(config_name: str | None = None) -> Flask:
 
     configure_github_cache(app)
 
+    # Prometheus metrics and the protected /metrics endpoint (Phase 10, #370).
+    # Registers the blueprint plus the per-request counter hook.
+    from app.observability import init_observability
+
+    init_observability(app)
+
     # Register blueprints.
     from app.admin import bp as admin_bp
     from app.auth import bp as auth_bp
