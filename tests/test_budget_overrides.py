@@ -128,6 +128,7 @@ def test_creation_records_who_set_the_override_and_why(db, make_user):
         "starts_at": NOW.isoformat(),
         "expires_at": (NOW + timedelta(hours=2)).isoformat(),
         "reason": "Temporary marketing push",
+        "diff": {"limit_amount": {"before": None, "after": 500.0}},
     }
 
 

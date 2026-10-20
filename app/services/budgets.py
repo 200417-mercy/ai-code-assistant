@@ -38,7 +38,7 @@ from app.models.budget import (
 )
 from app.models.project import Project
 from app.models.usage_record import UsageRecord
-from app.services import notifications
+from app.services import audit, notifications
 
 logger = logging.getLogger(__name__)
 
@@ -549,6 +549,45 @@ def validate_period(period: str | None) -> str:
     return period
 
 
+#: Allowlisted budget fields captured in the audit diff. Never widen this to a
+#: raw request payload: budget metadata must not be able to carry secrets.
+BUDGET_DIFF_FIELDS = ("period", "token_limit", "cost_limit", "warn_threshold", "is_active")
+MAX_BUDGET_DIFF_VALUE_CHARS = 120
+
+
+def _bounded_diff_value(value):
+    """Return a JSON-safe, size-bounded value for the audit diff."""
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return str(value)[:MAX_BUDGET_DIFF_VALUE_CHARS]
+
+
+def _budget_snapshot(budget: Budget | None) -> dict:
+    if budget is None:
+        return dict.fromkeys(BUDGET_DIFF_FIELDS)
+    return {
+        field: _bounded_diff_value(getattr(budget, field, None)) for field in BUDGET_DIFF_FIELDS
+    }
+
+
+def _budget_diff(before: dict, after: dict) -> dict:
+    return {
+        field: {"before": before[field], "after": after[field]}
+        for field in BUDGET_DIFF_FIELDS
+        if before[field] != after[field]
+    }
+
+
+def _actor_audit_kwargs(actor) -> dict:
+    if actor is None:
+        return {}
+    if hasattr(actor, "id"):
+        return {"user": actor}
+    if isinstance(actor, int):
+        return {"user_id": actor}
+    return {}
+
+
 def upsert_budget(
     *,
     scope: str,
@@ -573,6 +612,8 @@ def upsert_budget(
     else:
         query = query.filter_by(workspace_id=scope_id, user_id=None)
     budget = query.order_by(Budget.updated_at.desc()).first()
+    created = budget is None
+    before = _budget_snapshot(budget)
 
     if budget is None:
         budget = Budget(
@@ -587,10 +628,24 @@ def upsert_budget(
     budget.warn_threshold = threshold
     budget.is_active = True
     budget.updated_at = datetime.now(UTC)
+
+    # Flush first so a newly created row has an id for the audit target.
+    db.session.flush()
+    after = _budget_snapshot(budget)
+    audit.record(
+        audit.BUDGET_CREATED if created else audit.BUDGET_UPDATED,
+        target_type="budget",
+        target_id=budget.id,
+        metadata={
+            "scope": budget.scope,
+            "scope_id": budget.scope_id,
+            "diff": _budget_diff(before, after),
+        },
+        **_actor_audit_kwargs(actor),
+    )
+
     if commit:
         db.session.commit()
-    else:
-        db.session.flush()
     return budget
 
 

@@ -5,8 +5,8 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from app.extensions import db
-from app.models import Budget, Conversation, Notification, UsageRecord, Workspace
-from app.services import budgets
+from app.models import AuditLog, Budget, Conversation, Notification, UsageRecord, Workspace
+from app.services import audit, budgets
 
 
 def _workspace(user, name="Workspace"):
@@ -296,6 +296,120 @@ class TestBudgetApi:
 
         login("intruder@example.com")
         assert client.delete(f"/billing/api/budgets/{budget.id}").status_code == 403
+
+
+class TestBudgetAudit:
+    def test_create_records_bounded_diff_and_actor(self, client, make_user, login):
+        user = make_user()
+        login()
+
+        response = client.put(
+            "/billing/api/budgets",
+            json={"scope": "user", "token_limit": 500, "cost_limit": 2.5},
+        )
+        assert response.status_code == 200
+        budget = Budget.query.one()
+
+        entry = AuditLog.query.filter_by(action=audit.BUDGET_CREATED).one()
+        assert entry.user_id == user.id
+        assert entry.target_type == "budget"
+        assert entry.target_id == budget.id
+        metadata = entry.metadata_dict
+        assert metadata["scope"] == "user"
+        assert metadata["scope_id"] == user.id
+        assert metadata["diff"]["token_limit"] == {"before": None, "after": 500}
+        assert metadata["diff"]["cost_limit"] == {"before": None, "after": 2.5}
+        # The service owns the audit write; the route must not add a second row.
+        assert AuditLog.query.filter_by(action=audit.BUDGET_CREATED).count() == 1
+        assert AuditLog.query.filter_by(action=audit.BUDGET_UPDATED).count() == 0
+
+    def test_update_records_only_changed_fields(self, client, make_user, login):
+        make_user()
+        login()
+        client.put(
+            "/billing/api/budgets",
+            json={
+                "scope": "user",
+                "token_limit": 100,
+                "cost_limit": 1.0,
+                "warn_threshold": 0.8,
+            },
+        )
+        client.put(
+            "/billing/api/budgets",
+            json={
+                "scope": "user",
+                "token_limit": 200,
+                "cost_limit": 1.0,
+                "warn_threshold": 0.5,
+            },
+        )
+
+        entry = AuditLog.query.filter_by(action=audit.BUDGET_UPDATED).one()
+        diff = entry.metadata_dict["diff"]
+        assert diff["token_limit"] == {"before": 100, "after": 200}
+        assert diff["warn_threshold"] == {"before": 0.8, "after": 0.5}
+        assert "cost_limit" not in diff
+
+    def test_zero_limits_are_preserved_in_diff(self, client, make_user, login):
+        make_user()
+        login()
+        client.put(
+            "/billing/api/budgets",
+            json={"scope": "user", "token_limit": 0, "cost_limit": 0},
+        )
+
+        diff = AuditLog.query.filter_by(action=audit.BUDGET_CREATED).one().metadata_dict["diff"]
+        assert diff["token_limit"] == {"before": None, "after": 0}
+        assert diff["cost_limit"] == {"before": None, "after": 0}
+
+    def test_unknown_payload_fields_are_not_audited(self, client, make_user, login):
+        make_user()
+        login()
+        response = client.put(
+            "/billing/api/budgets",
+            json={
+                "scope": "user",
+                "token_limit": 10,
+                "api_key": "sk-secret",
+                "password": "hunter2",
+                "token": "top-secret",
+            },
+        )
+        assert response.status_code == 200
+
+        entry = AuditLog.query.filter_by(action=audit.BUDGET_CREATED).one()
+        metadata = entry.metadata_dict
+        assert set(metadata) == {"scope", "scope_id", "diff"}
+        serialized = str(metadata)
+        assert "sk-secret" not in serialized
+        assert "hunter2" not in serialized
+        assert "top-secret" not in serialized
+
+    def test_direct_service_upsert_is_audited(self, app, make_user):
+        user = make_user()
+        budget = budgets.upsert_budget(
+            scope="user",
+            scope_id=user.id,
+            token_limit=42,
+            actor=user,
+        )
+
+        entry = AuditLog.query.filter_by(action=audit.BUDGET_CREATED).one()
+        assert entry.user_id == user.id
+        assert entry.target_id == budget.id
+
+    def test_validation_failure_writes_no_audit(self, client, make_user, login):
+        make_user()
+        login()
+        response = client.put("/billing/api/budgets", json={"scope": "user"})
+        assert response.status_code == 400
+        assert (
+            AuditLog.query.filter(
+                AuditLog.action.in_([audit.BUDGET_CREATED, audit.BUDGET_UPDATED])
+            ).count()
+            == 0
+        )
 
 
 class TestNotifications:

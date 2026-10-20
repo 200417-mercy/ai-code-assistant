@@ -226,20 +226,6 @@ def api_upsert_budget():
     except budgets.BudgetValidationError as exc:
         return jsonify({"error": str(exc), "kind": "invalid"}), 400
 
-    audit.record(
-        audit.BUDGET_UPDATED,
-        user=current_user,
-        target_type="budget",
-        target_id=budget.id,
-        metadata={
-            "scope": budget.scope,
-            "scope_id": budget.scope_id,
-            "token_limit": budget.token_limit,
-            "cost_limit": budget.cost_limit,
-            "warn_threshold": budget.warn_threshold,
-        },
-    )
-    db.session.commit()
     row = _with_scope_names([_budget_status(budget)])[0]
     return jsonify({"budget": row}), 200
 
