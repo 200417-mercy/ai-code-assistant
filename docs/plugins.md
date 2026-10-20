@@ -479,6 +479,32 @@ timeout states (shared with `plugin_marketplace.js`), and owner-only
 install/update/rollback buttons with surfaced errors. Catalog text is escaped
 before rendering.
 
+### Marketplace discovery API (#360)
+
+The read-only discovery API advertises catalog entries without installing
+anything. It is separate from the per-workspace installer catalog above:
+
+| Route | Access | Description |
+| ----- | ------ | ----------- |
+| `GET /plugins/api/marketplace` | any signed-in workspace member | Paginated list with optional `q` (id/name/description/author), `capability`, and `workspace_id` filters. |
+| `GET /plugins/api/marketplace/<id>` | any signed-in workspace member | One entry, newest version by default or `?version=` pinned. |
+
+`app/services/marketplace.py` loads the catalog from
+`PLUGIN_MARKETPLACE_CATALOG` (default `plugins/marketplace.json`, which ships
+empty so the offline default is safe). If `PLUGIN_MARKETPLACE_URL` is set and no
+local catalog is configured, the document is fetched through
+`app/services/plugin_network.py`: HTTPS only, allowlisted host, bounded timeout
+and body size, and redirects refused. Every embedded manifest is validated
+against [`plugins/plugin.schema.json`](../plugins/plugin.schema.json); malformed
+entries reject the catalog instead of being silently skipped.
+
+Each returned entry contains only `id`, `name`, `version`, `description`,
+`author`, `capabilities`, `permissions`, `dependencies`, `compatibility`,
+`integrity`, and `source` (plus `signature` when present). Catalog data is
+untrusted metadata: it is never executed and never grants capabilities.
+Pagination is bounded (`page >= 1`, `limit` clamped to 100) and ordered by id
+then version. Tests live in `tests/test_marketplace_catalog.py`.
+
 ### Catalog dependency validation (#391)
 
 Before a catalog install writes anything, `CatalogDependencyGraph`
@@ -566,7 +592,9 @@ trusted, and plugin outbound traffic is denied until an operator opts in.
 | Variable | Safe default | Purpose |
 | -------- | ------------ | ------- |
 | `PLUGIN_CATALOG_FILE` | empty | Path to the validated JSON catalog used by `POST .../plugins/install-from-catalog`. Empty disables catalog installation. |
-| `PLUGIN_MARKETPLACE_URL` | empty | Optional https catalog URL fetched through the bounded plugin transport when `PLUGIN_CATALOG_FILE` is empty. The host must be on `PLUGIN_NETWORK_ALLOWLIST`; redirects, non-https URLs, oversized bodies, and non-allowlisted hosts are refused before any request. |
+| `PLUGIN_MARKETPLACE_ENABLED` | `1` | Enables the read-only discovery API (`GET /plugins/api/marketplace`). Disabling returns 404. |
+| `PLUGIN_MARKETPLACE_CATALOG` | `plugins/marketplace.json` | Local JSON catalog for the discovery API. Ships empty; set it to advertise validated entries. |
+| `PLUGIN_MARKETPLACE_URL` | empty | Optional https catalog URL fetched through the bounded plugin transport when no local marketplace catalog is configured. The host must be on `PLUGIN_NETWORK_ALLOWLIST`; redirects, non-https URLs, oversized bodies, and non-allowlisted hosts are refused before any request. |
 | `PLUGIN_DISCOVERY_DIR` | `plugins` | Read-only directory scanned for `manifest.json` files by `GET /plugins/discover`. Nothing is installed or executed. |
 | `PLUGIN_TRUST_POLICY` | `if-present` | `if-present` accepts unsigned manifests but always refuses forged or untrusted signatures; `required` also refuses unsigned manifests. Use `required` for a hosted marketplace. |
 | `PLUGIN_TRUSTED_KEYS` | `{}` | JSON object of canonical publisher ids to Ed25519 public keys (base64 raw 32 bytes or PEM). Invalid key material aborts startup. |

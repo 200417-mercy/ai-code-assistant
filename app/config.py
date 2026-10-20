@@ -154,6 +154,17 @@ class Config:
     # client-supplied manifest or URL. See ``app/services/plugin_catalog.py``.
     PLUGIN_CATALOG_FILE = os.getenv("PLUGIN_CATALOG_FILE", "")
 
+    # Read-only marketplace catalog (Phase 9, issue #360). Enabled by default
+    # with the offline, empty catalog shipped in ``plugins/marketplace.json``.
+    # ``PLUGIN_MARKETPLACE_CATALOG`` points at a local JSON document;
+    # ``PLUGIN_MARKETPLACE_URL`` optionally fetches an HTTPS document through
+    # the bounded plugin transport. Catalog data is never executed.
+    PLUGIN_MARKETPLACE_ENABLED = os.getenv("PLUGIN_MARKETPLACE_ENABLED", "1") == "1"
+    PLUGIN_MARKETPLACE_CATALOG = os.getenv(
+        "PLUGIN_MARKETPLACE_CATALOG",
+        str(BASE_DIR / "plugins" / "marketplace.json"),
+    )
+
     # Optional remote marketplace catalog (#375). When no local catalog file is
     # configured, the scanner may fetch this URL through the bounded plugin
     # transport: https only, host allowlisted, timeout, size cap, no redirects.
@@ -299,6 +310,13 @@ class Config:
     # tight per-user limit of its own.
     RATE_LIMIT_EXPORT_MAX = int(os.getenv("RATE_LIMIT_EXPORT_MAX", "10"))
     RATE_LIMIT_EXPORT_WINDOW = int(os.getenv("RATE_LIMIT_EXPORT_WINDOW", "3600"))
+    # Observability (Phase 10, issue #370). ``METRICS_ENABLED=0`` hides the
+    # endpoint entirely (404). When ``METRICS_TOKEN`` is set, scrapers must send
+    # ``Authorization: Bearer <token>``; when it is empty, only an authenticated
+    # site-admin session may read /metrics. The endpoint is always bounded by
+    # the registry's per-metric series cap.
+    METRICS_ENABLED = os.getenv("METRICS_ENABLED", "1") == "1"
+    METRICS_TOKEN = os.getenv("METRICS_TOKEN", "")
     # Per-user rate limit for AI-powered endpoints (#28): project chat,
     # conversation streaming, and the code tools. Applies per authenticated user
     # (not per IP) and can be switched off entirely (the testing config does).

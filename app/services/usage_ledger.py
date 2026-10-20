@@ -288,6 +288,19 @@ def record_usage(
 
     if commit:
         db.session.commit()
+
+    # Publish token/cost counters for the protected /metrics endpoint (#370).
+    # Recording is best-effort and only touches in-process counters, so it can
+    # never change the ledger result or fail an accounting path.
+    from app.observability import record_usage as record_metrics_usage
+
+    record_metrics_usage(
+        provider or "",
+        model or "",
+        counts["prompt_tokens"],
+        counts["completion_tokens"],
+        cost_estimate,
+    )
     return record
 
 

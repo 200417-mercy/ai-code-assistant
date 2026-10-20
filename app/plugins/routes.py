@@ -30,6 +30,14 @@ from app.models.workspace_member import STATUS_ACTIVE
 from app.plugins import bp
 from app.services.capabilities import Capability, CapabilityStore
 from app.services.events import emit_event
+from app.services.marketplace import (
+    MarketplaceDisabledError,
+    MarketplaceEntryNotFoundError,
+    MarketplaceError,
+    MarketplaceUnavailableError,
+    filter_entries,
+    load_marketplace,
+)
 from app.services.permissions import (
     can,
     require_workspace_capability,
@@ -1475,3 +1483,108 @@ def api_get_lockfile(workspace_id: int):
     lock_entries = PluginLockEntry.query.filter_by(workspace_id=workspace_id).all()
     lockfile = build_lockfile(lock_entries)
     return jsonify(lockfile)
+
+
+# --------------------------------------------------------------------------
+# API: read-only marketplace catalog (Phase 9, issue #360)
+# --------------------------------------------------------------------------
+
+
+def _marketplace_workspace() -> dict | None:
+    """Resolve an optional ``workspace_id`` filter for marketplace reads.
+
+    Without ``workspace_id`` the catalog is global metadata available to any
+    signed-in user. When supplied, the caller must be an active member (or the
+    owner); non-members get the same uniform 404 as every other workspace read.
+    """
+    workspace_id = request.args.get("workspace_id", type=int)
+    if workspace_id is None:
+        return None
+    workspace = resolve_workspace(workspace_id)
+    return {"id": workspace.id, "role": role_for(workspace.id, current_user)}
+
+
+def _marketplace_error(exc: MarketplaceError):
+    """Map service errors to read-only API responses (never leak file paths)."""
+    if isinstance(exc, MarketplaceDisabledError):
+        return jsonify({"error": "The plugin marketplace is disabled.", "code": "disabled"}), 404
+    if isinstance(exc, MarketplaceUnavailableError):
+        return jsonify({"error": "The plugin catalog is unavailable.", "code": "unavailable"}), 404
+    return jsonify({"error": f"Invalid plugin catalog: {exc}", "code": "invalid"}), 400
+
+
+def _marketplace_page(entries):
+    """Paginate filtered entries with the shared bounded convention."""
+    page = request.args.get("page", type=int)
+    if page is None or page < 1:
+        page = 1
+    limit = request.args.get("limit", type=int)
+    if limit is None:
+        limit = DEFAULT_PAGE_LIMIT
+    limit = max(1, min(limit, MAX_PAGE_LIMIT))
+
+    total = len(entries)
+    pages = (total + limit - 1) // limit if total else 0
+    offset = (page - 1) * limit
+    return entries[offset : offset + limit], {
+        "page": page,
+        "limit": limit,
+        "max_limit": MAX_PAGE_LIMIT,
+        "total": total,
+        "pages": pages,
+        "has_next": page < pages,
+        "has_prev": page > 1,
+    }
+
+
+@bp.route("/api/marketplace", methods=["GET"])
+@login_required
+def api_marketplace():
+    """List advertised catalog entries (read-only; any signed-in workspace member).
+
+    Query parameters:
+        ``q``             free-text match on id, name, description, author.
+        ``capability``    only advertise entries requiring this capability.
+        ``workspace_id``  optionally resolve the caller's role in a workspace.
+        ``page`` / ``limit`` bounded pagination (limit capped at 100).
+
+    The catalog is untrusted metadata. It is never executed and never grants a
+    capability; installation still requires an explicit, validated install.
+    """
+    try:
+        workspace = _marketplace_workspace()
+        catalog = load_marketplace(current_app.config)
+    except MarketplaceError as exc:
+        return _marketplace_error(exc)
+
+    query = (request.args.get("q") or "").strip()
+    capability = (request.args.get("capability") or "").strip()
+    filtered = filter_entries(catalog, query=query, capability=capability)
+    page_entries, pagination = _marketplace_page(filtered)
+    plugins = [entry.to_dict() for entry in page_entries]
+    return jsonify(
+        {
+            "workspace": workspace,
+            "entries": plugins,
+            "plugins": plugins,
+            "pagination": pagination,
+            "filters": {"q": query or None, "capability": capability or None},
+            "ordering": ["id", "version"],
+        }
+    )
+
+
+@bp.route("/api/marketplace/<plugin_id>", methods=["GET"])
+@login_required
+def api_marketplace_entry(plugin_id: str):
+    """Return one advertised entry, optionally pinned to ``?version=``."""
+    try:
+        workspace = _marketplace_workspace()
+        catalog = load_marketplace(current_app.config)
+        entry = catalog.get(plugin_id, request.args.get("version"))
+    except MarketplaceEntryNotFoundError as exc:
+        return jsonify({"error": str(exc), "code": "not_found"}), 404
+    except MarketplaceError as exc:
+        return _marketplace_error(exc)
+
+    return jsonify({"workspace": workspace, "entry": entry.to_dict()})

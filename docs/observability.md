@@ -1,121 +1,118 @@
-# Observability design
+# Observability
 
-> **Implementation status:** The ledger, metrics registry, endpoints, settings
-> and module/test paths below are proposed architecture, have been  implemented  in app/observability/
-> interfaces in this revision. In particular, `LEDGER_MAX_RECORDS` is not an
-> active retention control. For what is stored and accessible today, see
-> [Usage and billing data privacy](usage-privacy.md).
-
-This document describes the proposed observability surface: the usage ledger, dashboards, metrics and logging. It covers the data flow, the exposed endpoints, and the configuration knobs that control each piece.
+The application records usage and cost data in an append-only ledger, exposes
+bounded Prometheus counters, and renders dashboards from stored rows. Nothing in
+this surface stores prompts, completions, or secrets — see
+[Usage and billing data privacy](usage-privacy.md).
 
 ## Data flow
 
-Observability data flows through three stages:
+1. **Instrumentation.** LLM-backed paths append a `UsageRecord` through
+   `app/services/usage_ledger.py`. The same call updates the in-process token and
+   cost counters. Every request also increments an HTTP counter via the
+   `after_request` hook registered by `app/observability/__init__.py`.
+2. **Aggregation.** Dashboards, exports, budgets, and cost estimates compute
+   from the ledger on read. The ledger is the single source of truth.
+3. **Exposition.** `/metrics` serves Prometheus text; `/billing/*`, `/admin/*`,
+   and `/api/usage/*` serve JSON/CSV dashboards and exports. Chat audit logging
+   emits security-relevant events separately.
 
-1. **Instrumentation** -- the application records usage events and metrics as requests are processed. Each request emits a structured log record and updates the in-process metrics registry. Usage events are appended to the usage ledger.
-2. **Aggregation** -- the usage ledger accumulates append-only records of consumption (tokens, requests, latency, and outcome). Aggregations are computed on read by the dashboard and metrics endpoints, so the ledger remains the single source of truth.
-3. **Exposition** -- metrics are served in Prometheus text format for scraping, the dashboard renders human-readable summaries, and logs are emitted to the configured sink.
-
-The flow is one-way: request -> instrumentation -> ledger + registry -> aggregation -> endpoints. No endpoint mutates the ledger.
+No read endpoint mutates the ledger.
 
 ## Usage ledger
 
-The usage ledger is an append-only sequence of records. Each record captures:
+`UsageRecord` (`app/models/usage_record.py`) stores metadata only:
 
-- `timestamp` -- UTC time the event was recorded.
-- `request_id` -- correlation identifier shared with the log record.
-- `endpoint` -- the handler that produced the event.
-- `tokens_in` / `tokens_out` -- consumption counters.
-- `latency_ms` -- end-to-end latency for the request.
-- `outcome` -- one of `success`, `error`, or `denied`.
+| Column | Meaning |
+| ------ | ------- |
+| `user_id`, `workspace_id`, `project_id`, `conversation_id` | Optional scope. Rows follow the caller's ownership checks. |
+| `source` | Operation family: `chat`, `project_chat`, `analysis`, `review`, `tools`, or `unknown`. |
+| `provider`, `model` | Provider/model labels; unknown combinations are kept as `unknown`. |
+| `prompt_tokens`, `completion_tokens`, `total_tokens`, `tokens_estimated` | Token counts and whether they were estimated. |
+| `cost_estimate` | Estimated cost in the configured display currency, or `NULL` when the price is unknown. |
+| `request_id`, `latency_ms`, `status` | Correlation/performance metadata and `success`/`error`/`denied`. |
+| `created_at` | UTC timestamp. |
 
-Records are written in arrival order and are never updated or deleted. Readers derive counts, sums, and histograms from the raw records, which keeps the ledger auditable and replayable.
+The ledger is append-only. `flask usage backfill` imports historical assistant
+messages in bounded, idempotent batches; `flask usage purge` removes rows older
+than `USAGE_RETENTION_DAYS`. Denied calls do not count toward budgets.
 
 ## Metrics
 
-Metrics are held in an in-process registry and exposed in Prometheus text format. The following metric families are emitted:
+`GET /metrics` returns Prometheus `text/plain; version=0.0.4` and is bounded by
+`MAX_SERIES_PER_METRIC` (500) per counter; overflow is folded into an `other`
+series so a hostile label cannot grow memory without limit.
 
-| Metric | Type | Labels | Description |
-| ------ | ---- | ------ | ----------- |
-| `requests_total` | counter | `endpoint`, `outcome` | Total requests processed. |
-| `tokens_total` | counter | `direction` | Total tokens consumed (`irection=` in` or `out`). |
-| `request_latency_ms` | histogram | `endpoint` | Request latency in milliseconds. |
-| `ledger_records` | gauge | none | Number of records currently in the usage ledger. |
+| Metric | Type | Labels | Meaning |
+| ------ | ---- | ------ | ------- |
+| `http_requests_total` | counter | `method`, `endpoint`, `status` | Requests by route pattern and status class. |
+| `llm_tokens_total` | counter | `provider`, `model`, `direction` | Tokens consumed (`in`/`out`). |
+| `llm_cost_usd_total` | counter | `provider`, `model` | Estimated cost accumulated from ledger writes. |
 
-Metrics are monotonic where appropriate (counters) and are never reset at runtime. Histogram buckets are configurable (see below).
+Endpoint protection:
 
-## Endpoints
+- `METRICS_TOKEN` set → requires `Authorization: Bearer <token>`
+  (constant-time comparison).
+- `METRICS_TOKEN` empty → only an authenticated site-admin session may read it.
+- `METRICS_ENABLED=0` → `404`.
+- Responses are `Cache-Control: no-store`.
 
-| Endpoint | Method | Description |
-| -------- | ------ | ----------- |
-| `/metrics` | GET | Prometheus text format exposition of the metrics registry. |
-| `/observability/dashboard` | GET | JSON summary of requests, tokens, latency and outcomes derived from the ledger. |
-| `/observability/ledger` | GET | Paginated raw ledger records for audit and debugging. |
+The registry is in-process: counters reset when the process restarts and are not
+shared across workers. Scrape each worker, or aggregate in your metrics backend.
 
-All endpoints return `\*404` for unknown paths and `\*500` with a structured error body on failure. The `/metrics` endpoint is intended for scrapers and is not cached.
-
-### Usage and cost dashboards (#368)
-
-The dashboard surface is implemented in `app/services/usage_dashboards.py` and
-aggregates only stored `usage_records` rows (never prompts or message counters):
+## Dashboards
 
 | Endpoint | Access | Description |
 | -------- | ------ | ----------- |
-| `/billing/usage` | signed-in owner | HTML per-user dashboard; `workspace_id` selects an owned workspace and `days` bounds the window (1-365). |
-| `/billing/api/usage/dashboard` | signed-in owner | JSON totals, breakdowns by source/provider/model, and a daily series. |
-| `/billing/api/usage/dashboard.csv` | signed-in owner | Bounded CSV export of the owner's rows. |
-| `/billing/api/workspaces/<id>/usage` | workspace owner or site admin | Workspace-scoped dashboard; other callers get a uniform `404`. |
-| `/billing/api/workspaces/<id>/usage.csv` | workspace owner or site admin | Workspace-scoped CSV export. |
-| `/admin/usage` | site admin | Org-wide totals, breakdowns, daily series, and per-user rows. |
-| `/admin/usage/export.csv` | site admin | Org-wide bounded CSV export. |
+| `GET /api/usage` | signed-in user | Current user's usage summary. |
+| `GET /api/usage/breakdown` | signed-in user | Totals grouped by source/provider/model. |
+| `GET /api/usage/top` | signed-in user | Most expensive conversations/projects; `limit` ≤ 50. |
+| `GET /billing/usage` | signed-in owner | HTML usage page; `workspace_id` selects an owned workspace. |
+| `GET /billing/api/usage/dashboard` | signed-in owner | JSON totals, breakdowns, daily series; `days` is 1–365. |
+| `GET /billing/api/usage/dashboard.csv` | signed-in owner | Bounded CSV export. |
+| `GET /billing/api/workspaces/<id>/usage` | workspace owner or site admin | Workspace-scoped dashboard; other callers get a uniform `404`. |
+| `GET /billing/api/workspaces/<id>/usage.csv` | workspace owner or site admin | Workspace-scoped CSV export. |
+| `GET /admin/usage` | site admin | Org-wide totals and per-user breakdown. |
+| `GET /admin/usage/export.csv` | site admin | Org-wide bounded CSV export. |
 
-CSV exports stop after 5,000 rows or 2 MiB, whichever comes first, and set
-`X-Export-Truncated: true` when rows were omitted. Empty scopes return zero
-totals with the same shape, so clients render empty states without guessing.
+Empty scopes return zero totals and empty breakdowns with the same shape, so
+clients render empty states without guessing. CSV exports stop at 5,000 rows or
+2 MiB, whichever comes first, and set `X-Export-Truncated: true` when clipped.
 
-## Logging
+## Usage export
 
-Logs are emitted as structured JSON objects, one per line. Each record includes:
+`GET /api/usage/export` returns a paginated JSON document scoped to the current
+user. `workspace_id`, `project_id`, and `source` only narrow that user's rows —
+they can never expose another account's usage. `page` starts at 1 and `limit` is
+clamped to 1–500.
 
-- $level$ -- one of `debug`, `info`, `warning`, `error`.
-- `message` -- human-readable description.
-- `timestamp` -- ISO 8601 UTC time.
-- `request_id` -- correlation identifier shared with the ledger record.
-- `endpoint` -- the handler that produced the log.
+The document contains:
 
-Log levels are configurable and default to `info`. Request logs are emitted on completion so that latency and outcome are available in the same record as the ledger entry.
+- `schema_version`, `exported_at`, and the applied `filters`;
+- `pagination` (`page`, `limit`, `max_limit`, `total`, `pages`, `has_next`,
+  `has_prev`);
+- `totals` for the full filtered set and `page_totals` for the page;
+- `records` serialized with the ledger serializer;
+- `currency` and `cost_is_estimate: true`.
 
 ## Configuration
 
-The following settings control observability behaviour:
+| Setting | Default | Purpose |
+| ------- | ------- | ------- |
+| `METRICS_ENABLED` | `1` | Hides `/metrics` (404) when disabled. |
+| `METRICS_TOKEN` | empty | Bearer token for scrapers. Empty falls back to admin-session auth. |
+| `USAGE_RETENTION_DAYS` | `365` | Minimum age before `flask usage purge` may delete ledger rows. |
+| `BILLING_IMPORT_MAX_BYTES` | `1048576` | Maximum accepted billing CSV upload size. |
+| `BILLING_IMPORT_MAX_ROWS` | `5000` | Maximum accepted billing CSV rows. |
+| `CURRENCY_CODE` / `CURRENCY_SYMBOL` / `CURRENCY_DECIMAL_PLACES` | `USD` / `$` / `4` | Display currency for cost figures. |
 
-| Setting | Default | Description |
-| ------- | ------- | ----------- |
-| `LOG_LEVEL` | `info` | Minimum log level emitted. |
-| `LOG_SINK` | `stdout` | Destination for structured log records. |
-| `METRICS_ENABLED` | `true` | Toggles the `/metrics` endpoint. |
-| `METRICS_LATENCY_BUCKETS` | `10,50,100,500,1000,2500,5000,10000` | Histogram bucket edges in milliseconds. |
-| `LEDGER_MAX_RECORDS` | `100000` | Maximum number of records retained in the ledge. |
-| `LEDGER_PAGE_SIZE` | `100` | Default page size for `/observability/ledger`. |
+## Implementation and tests
 
-Settings are read at startup. Changing `METRICS_LATENCY_BUCKETS` requires a restart because histogram buckets are fixed on creation.
-
-## Implementation
-
-The implementation lives in the observability module:
-
-- Usage ledger and record model: `observability/ledger.py`.
-- Metrics registry and Prometheus exposition: `observability/metrics.py`.
-- Dashboard and ledger endpoints: `observability/endpoints.py`.
-- Structured logging: `observability/logging.py`.
-
-## Tests
-
-The observability behaviour is covered by:
-
-- `observability/tests_test_ledger.py` -- append-only semantics, retention limits, and pagination.
-- `observability/tests_test_metrics.py` -- counter and histogram recording and Prometheus output.
-- `observability/tests_test_endpoints.py` -- `/metrics`, `/observability/dashboard`, and `/observability/ledger` responses.
-- `observability/tests_test_logging.py` -- structured log format and level filtering.
-
-Run the suite with `pytest` and keep it green alongside `ruff check .` and `black --check .`.
+- Ledger: `app/services/usage_ledger.py`, `app/models/usage_record.py`.
+  Tests: `tests/test_usage_ledger.py`, `tests/test_usage_export.py`.
+- Metrics: `app/observability/metrics.py`, `app/observability/routes.py`.
+  Tests: `tests/test_metrics.py`, `tests/test_metrics_from_stored_rows.py`.
+- Dashboards and CSV: `app/services/usage_dashboards.py`,
+  `app/billing/routes.py`, `app/admin/routes.py`.
+  Tests: `tests/test_usage_dashboards.py`, `tests/test_dashboard_authorization.py`.
+- Budgets and cost: see [Billing](billing.md).
