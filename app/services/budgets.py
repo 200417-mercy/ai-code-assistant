@@ -75,6 +75,8 @@ class BudgetStatus:
     cost_ratio: float | None
     limits_hit: tuple[str, ...]
     warned: bool
+    #: Costs in the ledger are estimates, never provider invoices.
+    cost_is_estimate: bool = True
 
     @property
     def scope(self) -> str:
@@ -102,6 +104,8 @@ class BudgetStatus:
                 "limits_hit": list(self.limits_hit),
                 "warned": self.warned,
                 "allowed": self.allowed,
+                "cost_is_estimate": self.cost_is_estimate,
+                "usage_is_estimated": True,
             }
         )
         return data

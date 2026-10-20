@@ -3126,3 +3126,62 @@ a:hover {
 .chat-message[data-message-id]::after {
   content: "";
 }
+/* Budget management and workspace usage dashboard (Phase 10 UI) */
+.budget-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: flex-end;
+  margin: 1rem 0;
+}
+
+.billing-table,
+.usage-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.75rem 0 1.5rem;
+}
+
+.billing-table th,
+.billing-table td,
+.usage-table th,
+.usage-table td {
+  padding: 0.5rem 0.6rem;
+  text-align: left;
+  border-bottom: 1px solid var(--border-color, #e5e7eb);
+  vertical-align: top;
+}
+
+.usage-line {
+  font-variant-numeric: tabular-nums;
+  margin-bottom: 0.25rem;
+}
+
+.usage-bar {
+  height: 0.35rem;
+  border-radius: 999px;
+  background: #e5e7eb;
+  overflow: hidden;
+  min-width: 6rem;
+}
+
+.usage-bar span {
+  display: block;
+  height: 100%;
+  background: #22c55e;
+}
+
+tr[data-budget-id] .usage-bar span {
+  background: #3b82f6;
+}
+
+tr[data-budget-id] .usage-bar span[style*="100%"] {
+  background: #ef4444;
+}
+
+.usage-breakdown-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr));
+  gap: 1rem;
+  margin: 1rem 0;
+}

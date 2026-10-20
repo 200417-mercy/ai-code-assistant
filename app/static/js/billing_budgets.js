@@ -10,6 +10,9 @@
   var workspaceEl = document.getElementById("budget-workspace");
   var errorEl = document.getElementById("budget-error");
   var rowsEl = document.getElementById("budget-rows");
+  var tokenInput = document.getElementById("budget-tokens");
+  var costInput = document.getElementById("budget-cost");
+  var thresholdInput = document.getElementById("budget-threshold");
 
   function csrfToken() {
     var meta = document.querySelector('meta[name="csrf-token"]');
@@ -27,14 +30,50 @@
     workspaceField.hidden = scopeEl.value !== "workspace";
   }
 
-  scopeEl.addEventListener("change", syncScope);
+  function existingRow() {
+    if (!rowsEl) return null;
+    var scope = scopeEl.value;
+    var scopeId = scope === "workspace" ? workspaceEl.value : "";
+    var rows = rowsEl.querySelectorAll("tr[data-scope]");
+    for (var i = 0; i < rows.length; i += 1) {
+      if (
+        rows[i].dataset.scope === scope &&
+        String(rows[i].dataset.scopeId) === String(scopeId)
+      ) {
+        return rows[i];
+      }
+    }
+    return null;
+  }
+
+  // Prefill the form with the existing budget for the selected scope so the
+  // UI edits a configuration instead of silently replacing unknown values.
+  function syncForm() {
+    var row = existingRow();
+    if (!row) {
+      tokenInput.value = "";
+      costInput.value = "";
+      thresholdInput.value = "0.8";
+      return;
+    }
+    tokenInput.value = row.dataset.tokenLimit || "";
+    costInput.value = row.dataset.costLimit || "";
+    thresholdInput.value = row.dataset.warnThreshold || "0.8";
+  }
+
+  scopeEl.addEventListener("change", function () {
+    syncScope();
+    syncForm();
+  });
+  if (workspaceEl) workspaceEl.addEventListener("change", syncForm);
   syncScope();
+  syncForm();
 
   form.addEventListener("submit", function (event) {
     event.preventDefault();
     showError("");
-    var tokens = document.getElementById("budget-tokens").value.trim();
-    var cost = document.getElementById("budget-cost").value.trim();
+    var tokens = tokenInput.value.trim();
+    var cost = costInput.value.trim();
     if (!tokens && !cost) {
       showError("Set a token limit, a cost limit, or both.");
       return;
@@ -43,7 +82,7 @@
       scope: scopeEl.value,
       token_limit: tokens || null,
       cost_limit: cost || null,
-      warn_threshold: document.getElementById("budget-threshold").value || null,
+      warn_threshold: thresholdInput.value || null,
     };
     if (scopeEl.value === "workspace") {
       payload.workspace_id = workspaceEl.value;
