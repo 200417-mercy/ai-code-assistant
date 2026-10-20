@@ -135,7 +135,7 @@ class TestLockfileReadApi:
         assert response.status_code == 200
         assert response.get_json() == {"lockfile_version": 1, "plugins": []}
 
-    def test_member_cannot_read_lockfile(self, client, make_user, login):
+    def test_member_can_read_lockfile_read_only(self, client, make_user, login):
         owner = make_user(username="owner", email="owner@example.com")
         member = make_user(username="member", email="member@example.com")
         ws = _workspace(owner)
@@ -145,8 +145,12 @@ class TestLockfileReadApi:
         login(email="member@example.com")
         response = client.get(self._url(ws.id))
 
-        # Owner-scoped capability -> forbidden for a member (not a leak).
-        assert response.status_code == 403
+        # The lockfile is member-readable metadata, but only the owner can
+        # change plugin state (mutating routes still require manage_plugins).
+        assert response.status_code == 200
+        payload = response.get_json()
+        assert payload["lockfile_version"] == 1
+        assert payload["plugins"][0]["plugin_id"] == "catalog-plugin"
 
     def test_non_member_gets_404(self, client, make_user, login):
         owner = make_user(username="owner", email="owner@example.com")

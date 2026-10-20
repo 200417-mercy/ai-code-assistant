@@ -327,3 +327,117 @@ class DependencyResolver:
         specifier = requirement.specifier
         if specifier and not specifier.contains(version, prereleases=True):
             failures.append((root_id, requirement, installed))
+
+
+class CatalogDependencyGraph:
+    """Build and validate a catalog entry's transitive dependency graph.
+
+    Unlike :class:`DependencyResolver`, which checks the *installed* environment
+    at enable time, this builder walks the operator-controlled catalog before an
+    install writes anything. Only dependencies whose names match a catalog
+    entry are traversed; Python package requirements and unknown plugin ids are
+    left for enable-time resolution, so a catalog install never requires a
+    dependency to already be installed.
+
+    The graph is deterministic: duplicate edges/nodes are collapsed and
+    independent branches are visited in canonical-id order, producing a
+    dependency-first topological order. Cycles are detected with a visiting
+    path and reported with the full chain (for example ``a -> b -> a``).
+    """
+
+    def __init__(self, catalog) -> None:
+        self._catalog = catalog
+        self._entries_by_name: dict[str, list] = {}
+        for entry in catalog.list_entries():
+            self._entries_by_name.setdefault(canonicalize_name(entry.plugin_id), []).append(entry)
+
+    def _entry_for_requirement(self, requirement: Requirement, path: tuple[str, ...]):
+        """Return the newest catalog entry satisfying ``requirement``, if any."""
+        matches = self._entries_by_name.get(canonicalize_name(requirement.name), [])
+        if not matches:
+            # Not a catalogued plugin: could be a Python package or a plugin
+            # installed from another source. Enable-time validation handles it.
+            return None
+        for entry in reversed(matches):
+            version = Version(entry.version)
+            if not requirement.specifier or requirement.specifier.contains(
+                version, prereleases=True
+            ):
+                return entry
+        raise PluginDependencyVersionError(
+            path[0],
+            f"dependency '{requirement}' has no catalogued version satisfying it "
+            f"(path: {' -> '.join(path)}).",
+        )
+
+    def _dependencies(self, entry, path: tuple[str, ...]):
+        """Return deduplicated, sorted ``(canonical_id, entry)`` dependencies."""
+        resolved: dict[tuple[str, Version], object] = {}
+        raw_dependencies = entry.manifest.get("dependencies") or ()
+        if not isinstance(raw_dependencies, (list, tuple)):
+            raise PluginDependencyUnparsableError(
+                entry.plugin_id,
+                f"Invalid dependency list on catalog entry {entry.plugin_id!r}.",
+            )
+        for raw in raw_dependencies:
+            try:
+                requirement = Requirement(str(raw).strip())
+            except InvalidRequirement as exc:
+                raise PluginDependencyUnparsableError(
+                    entry.plugin_id,
+                    f"Invalid dependency requirement: {raw!r} ({exc})",
+                ) from exc
+            if requirement.marker is not None and not requirement.marker.evaluate():
+                continue
+            dependency = self._entry_for_requirement(requirement, path)
+            if dependency is None:
+                continue
+            key = (canonicalize_name(dependency.plugin_id), Version(dependency.version))
+            resolved.setdefault(key, dependency)
+        return [resolved[key] for key in sorted(resolved, key=lambda item: (item[0], item[1]))]
+
+    def validate(self, entry) -> tuple[str, ...]:
+        """Return the dependency-first topological order for ``entry``.
+
+        Raises:
+            PluginDependencyCycleError: With the full chain when a cycle exists.
+            PluginDependencyUnparsableError: For an invalid requirement string.
+            PluginDependencyVersionError: When a catalogued dependency exists but
+                no catalogued version satisfies the declared range.
+        """
+        order: list[str] = []
+        visiting: list[str] = []
+        visited: set[str] = set()
+
+        def visit(node) -> None:
+            if node.plugin_id in visiting:
+                index = visiting.index(node.plugin_id)
+                cycle = [*visiting[index:], node.plugin_id]
+                raise PluginDependencyCycleError(
+                    node.plugin_id,
+                    "dependency cycle detected: " + " -> ".join(cycle),
+                )
+            canonical_id = canonicalize_name(node.plugin_id)
+            if canonical_id in visited:
+                return
+
+            visiting.append(node.plugin_id)
+            for dependency in self._dependencies(node, tuple(visiting)):
+                visit(dependency)
+            visiting.pop()
+
+            visited.add(canonical_id)
+            order.append(node.plugin_id)
+
+        visit(entry)
+        return tuple(order)
+
+
+def validate_catalog_dependencies(catalog, entry) -> tuple[str, ...]:
+    """Validate a catalog entry's transitive dependencies before install.
+
+    Returns the deterministic dependency-first order. Non-catalog dependencies
+    are intentionally not checked here; the existing enable-time resolver stays
+    authoritative for their installed state.
+    """
+    return CatalogDependencyGraph(catalog).validate(entry)
