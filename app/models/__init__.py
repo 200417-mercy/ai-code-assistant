@@ -8,6 +8,7 @@ from app.models.activity_event import ActivityEvent
 from app.models.analyzed_file import AnalyzedFile
 from app.models.api_key import ApiKey
 from app.models.audit_log import AuditLog
+from app.models.budget import Budget
 from app.models.conversation import Conversation
 from app.models.conversation_share import ConversationShare
 from app.models.file_analysis import FileAnalysis
@@ -44,6 +45,7 @@ __all__ = [
     "AnalyzedFile",
     "ApiKey",
     "AuditLog",
+    "Budget",
     "CapabilityGrant",
     "Conversation",
     "ConversationShare",

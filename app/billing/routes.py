@@ -13,7 +13,9 @@ from flask_login import current_user, login_required
 
 from app.billing import bp
 from app.extensions import db
+from app.models.budget import BUDGET_PERIODS
 from app.services import audit, billing_reconciliation
+from app.services import budgets as budget_service
 from app.services.billing_reconciliation import BillingImportError
 
 
@@ -108,3 +110,87 @@ def api_reconciliation():
     except BillingImportError as exc:
         return jsonify({"error": str(exc), "kind": exc.kind}), 400
     return jsonify(report)
+
+
+# ---------------------------------------------------------------------------
+# Budget CRUD API (#461) with owner/admin authorization (#468)
+# ---------------------------------------------------------------------------
+
+
+def _budget_not_found() -> tuple:
+    """Uniform refusal for missing and inaccessible budgets (no oracle)."""
+    return jsonify({"error": "Budget not found.", "kind": "not_found"}), 404
+
+
+def _budget_invalid(message: str) -> tuple:
+    return jsonify({"error": message, "kind": "invalid"}), 400
+
+
+@bp.route("/api/budgets", methods=["GET"])
+@login_required
+def api_list_budgets():
+    """List budgets the signed-in user may access."""
+    items = budget_service.list_budgets(current_user)
+    return jsonify(
+        {
+            "budgets": [budget.to_dict() for budget in items],
+            "periods": list(BUDGET_PERIODS),
+        }
+    )
+
+
+@bp.route("/api/budgets", methods=["POST"])
+@login_required
+def api_create_budget():
+    """Create a user budget or, for owners/admins, a workspace budget.
+
+    Body: ``name`` (optional), ``limit_amount`` (required, positive),
+    ``period`` (required), optional ``currency`` (default ``USD``) and optional
+    ``workspace_id`` to create a workspace-scoped budget.
+    """
+    try:
+        budget = budget_service.create_budget(current_user, request.get_json(silent=True) or {})
+    except budget_service.BudgetNotFoundError:
+        return _budget_not_found()
+    except budget_service.BudgetValidationError as exc:
+        db.session.rollback()
+        return _budget_invalid(str(exc))
+    return jsonify(budget.to_dict()), 201
+
+
+@bp.route("/api/budgets/<int:budget_id>", methods=["GET"])
+@login_required
+def api_get_budget(budget_id: int):
+    """Return one accessible budget."""
+    try:
+        budget = budget_service.get_budget(budget_id, current_user)
+    except budget_service.BudgetNotFoundError:
+        return _budget_not_found()
+    return jsonify(budget.to_dict())
+
+
+@bp.route("/api/budgets/<int:budget_id>", methods=["PUT", "PATCH"])
+@login_required
+def api_update_budget(budget_id: int):
+    """Update an accessible budget (scope and owner are immutable)."""
+    try:
+        budget = budget_service.update_budget(
+            budget_id, current_user, request.get_json(silent=True) or {}
+        )
+    except budget_service.BudgetNotFoundError:
+        return _budget_not_found()
+    except budget_service.BudgetValidationError as exc:
+        db.session.rollback()
+        return _budget_invalid(str(exc))
+    return jsonify(budget.to_dict())
+
+
+@bp.route("/api/budgets/<int:budget_id>", methods=["DELETE"])
+@login_required
+def api_delete_budget(budget_id: int):
+    """Delete an accessible budget."""
+    try:
+        budget_service.delete_budget(budget_id, current_user)
+    except budget_service.BudgetNotFoundError:
+        return _budget_not_found()
+    return "", 204
