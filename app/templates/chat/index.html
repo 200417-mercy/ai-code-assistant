@@ -3,7 +3,7 @@
 {% block title %}Chat - {{ config.APP_NAME }}{% endblock %}
 
 {% block content %}
-<div class="chat-layout">
+<div class="chat-layout" data-user-id="{{ current_user.id }}" data-username="{{ current_user.username }}">
   <aside class="chat-sidebar">
     <div class="sidebar-header">
       <h2>Conversations</h2>
@@ -58,6 +58,11 @@
   </aside>
 
   <section class="chat-main">
+    <div class="realtime-bar" aria-live="polite">
+      <span id="realtime-status" class="realtime-status" data-state="connecting">Connecting…</span>
+      <span id="realtime-presence" class="realtime-presence"></span>
+      <span id="remote-typing" class="remote-typing" hidden></span>
+    </div>
     <div id="chat-messages" class="chat-messages" role="log" aria-live="polite" aria-label="Conversation messages">
       <div class="chat-placeholder">
         <p>Start a conversation with the AI assistant.</p>
@@ -138,7 +143,9 @@
 {% endblock %}
 
 {% block scripts %}
+<script src="{{ url_for('static', filename='vendor/socket.io.min.js') }}"></script>
 <script src="{{ url_for('static', filename='js/chat_markdown.js') }}"></script>
 <script src="{{ url_for('static', filename='js/chat.js') }}"></script>
+<script src="{{ url_for('static', filename='js/chat_realtime.js') }}"></script>
 <script src="{{ url_for('static', filename='js/chat_files.js') }}"></script>
 {% endblock %}

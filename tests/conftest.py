@@ -135,7 +135,11 @@ def _reset_alert_state():
     import importlib
 
     resetters = []
-    for module_name in ("app.services.alerts", "app.services.budget_alerts"):
+    for module_name in (
+        "app.services.alerts",
+        "app.services.budget_alerts",
+        "app.services.budgets",
+    ):
         try:
             module = importlib.import_module(module_name)
         except ImportError:  # optional module: nothing to reset
@@ -143,6 +147,14 @@ def _reset_alert_state():
         reset = getattr(module, "reset", None)
         if callable(reset):
             resetters.append(reset)
+
+    # Real-time presence is process-local too.
+    try:
+        from app.collaboration import realtime
+
+        resetters.append(realtime.reset_presence)
+    except ImportError:  # pragma: no cover - optional dependency
+        pass
 
     for reset in resetters:
         reset()

@@ -80,7 +80,7 @@ from app.models.workspace_member import (
     ROLE_VIEWER,
     STATUS_ACTIVE,
 )
-from app.services import pricing, project_analysis, usage_ledger
+from app.services import budgets, pricing, project_analysis, usage_ledger
 from app.services.activity import record_activity
 from app.services.events import emit_event
 from app.services.exporting import export_filename, iter_export_zip
@@ -1247,6 +1247,7 @@ def api_project_chat_session(project_id: int, session_id: int):
 
 @bp.route("/api/projects/<int:project_id>/chat", methods=["POST"])
 @login_required
+@budgets.budget_guard
 @per_user_limit(
     "chat",
     max_config="RATE_LIMIT_CHAT_MAX",
@@ -1312,6 +1313,7 @@ def api_project_chat(project_id: int):
 
 @bp.route("/api/projects/<int:project_id>/chat/stream", methods=["POST"])
 @login_required
+@budgets.budget_guard
 @per_user_limit(
     "stream",
     max_config="RATE_LIMIT_STREAM_MAX",
@@ -1430,6 +1432,7 @@ def api_project_estimate(project_id: int):
 
 @bp.route("/api/projects/<int:project_id>/analyze", methods=["POST"])
 @login_required
+@budgets.budget_guard
 @per_user_limit(
     "analyze",
     max_config="RATE_LIMIT_ANALYZE_MAX",
