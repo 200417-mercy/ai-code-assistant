@@ -20,6 +20,7 @@ USER_CREATED = "user_created"
 CONVERSATION_DELETED = "conversation_deleted"
 PROMPT_DELETED = "prompt_deleted"
 PROVIDER_BILLING_IMPORTED = "provider_billing_imported"
+BUDGET_OVERRIDE_CREATED = "budget_override_created"
 
 
 def record(
