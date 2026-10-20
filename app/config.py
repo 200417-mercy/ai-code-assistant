@@ -154,6 +154,17 @@ class Config:
     # client-supplied manifest or URL. See ``app/services/plugin_catalog.py``.
     PLUGIN_CATALOG_FILE = os.getenv("PLUGIN_CATALOG_FILE", "")
 
+    # Read-only marketplace catalog (Phase 9, issue #360). Enabled by default
+    # with the offline, empty catalog shipped in ``plugins/marketplace.json``.
+    # ``PLUGIN_MARKETPLACE_CATALOG`` points at a local JSON document;
+    # ``PLUGIN_MARKETPLACE_URL`` optionally fetches an HTTPS document through
+    # the bounded plugin transport. Catalog data is never executed.
+    PLUGIN_MARKETPLACE_ENABLED = os.getenv("PLUGIN_MARKETPLACE_ENABLED", "1") == "1"
+    PLUGIN_MARKETPLACE_CATALOG = os.getenv(
+        "PLUGIN_MARKETPLACE_CATALOG",
+        str(BASE_DIR / "plugins" / "marketplace.json"),
+    )
+
     # Optional remote marketplace catalog (#375). When no local catalog file is
     # configured, the scanner may fetch this URL through the bounded plugin
     # transport: https only, host allowlisted, timeout, size cap, no redirects.
