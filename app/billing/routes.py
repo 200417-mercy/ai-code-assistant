@@ -19,6 +19,45 @@ from app.services.billing_reconciliation import BillingImportError
 from app.services.budget_access import can_access_workspace_billing
 
 
+def _budget_workspaces():
+    """Workspaces whose budgets the caller can manage.
+
+    Global admins may manage any workspace; everyone else is limited to the
+    workspaces they own (the only role with ``manage_billing`` today).
+    """
+    query = Workspace.query
+    if not current_user.is_admin:
+        query = query.filter_by(user_id=current_user.id)
+    return query.order_by(Workspace.name).all()
+
+
+def _workspace_for_budget(workspace_id: int):
+    """Resolve a workspace for budget management, allowing global admins."""
+    if current_user.is_admin:
+        workspace = db.session.get(Workspace, workspace_id)
+        if workspace is None:
+            abort(404)
+        return workspace
+    return permissions.resolve_workspace(workspace_id, current_user)
+
+
+def _can_manage_budget(workspace) -> bool:
+    return bool(current_user.is_admin) or permissions.can(
+        "manage_billing", workspace.id, current_user
+    )
+
+
+def _with_scope_names(rows: list[dict]) -> list[dict]:
+    """Attach a human-readable scope name to each budget status row."""
+    names = {workspace.id: workspace.name for workspace in _budget_workspaces()}
+    for row in rows:
+        if row.get("scope") == "workspace":
+            row["scope_name"] = names.get(row.get("scope_id"), f"Workspace #{row.get('scope_id')}")
+        else:
+            row["scope_name"] = "My account"
+    return rows
+
+
 def _wants_json() -> bool:
     if request.args.get("format") == "json":
         return True
@@ -53,17 +92,15 @@ def _extract_csv() -> tuple[str | None, str | None]:
 def index():
     """Render the reconciliation page for the signed-in user."""
     report = billing_reconciliation.reconciliation_report(user_id=current_user.id)
-    owned_workspaces = (
-        Workspace.query.filter_by(user_id=current_user.id).order_by(Workspace.name).all()
-    )
-    budget_rows = budgets.statuses_for_user(
-        current_user, [workspace.id for workspace in owned_workspaces]
+    managed_workspaces = _budget_workspaces()
+    budget_rows = _with_scope_names(
+        budgets.statuses_for_user(current_user, [workspace.id for workspace in managed_workspaces])
     )
     return render_template(
         "billing/index.html",
         report=report,
         budgets=budget_rows,
-        workspaces=owned_workspaces,
+        workspaces=managed_workspaces,
     )
 
 
@@ -130,11 +167,6 @@ def _json_payload() -> dict:
     return request.form.to_dict()
 
 
-def _authorized_workspace(workspace_id: int):
-    """Resolve a workspace for an owner who may manage its budget, or abort 404."""
-    return permissions.resolve_workspace(workspace_id, current_user)
-
-
 def _budget_status(budget: Budget) -> dict:
     return budgets.evaluate_budget(budget).to_dict()
 
@@ -143,12 +175,14 @@ def _budget_status(budget: Budget) -> dict:
 @login_required
 def api_list_budgets():
     """List the caller's user budget and workspace budgets they can manage."""
-    owned = Workspace.query.filter_by(user_id=current_user.id).order_by(Workspace.name).all()
-    rows = budgets.statuses_for_user(current_user, [workspace.id for workspace in owned])
+    managed = _budget_workspaces()
+    rows = _with_scope_names(
+        budgets.statuses_for_user(current_user, [workspace.id for workspace in managed])
+    )
     return jsonify(
         {
             "budgets": rows,
-            "workspaces": [{"id": workspace.id, "name": workspace.name} for workspace in owned],
+            "workspaces": [{"id": workspace.id, "name": workspace.name} for workspace in managed],
         }
     )
 
@@ -170,8 +204,8 @@ def api_upsert_budget():
             workspace_id = int(payload.get("workspace_id"))
         except (TypeError, ValueError):
             return jsonify({"error": "workspace_id is required.", "kind": "invalid"}), 400
-        workspace = _authorized_workspace(workspace_id)
-        if not permissions.can("manage_billing", workspace.id, current_user):
+        workspace = _workspace_for_budget(workspace_id)
+        if not _can_manage_budget(workspace):
             return jsonify({"error": "Forbidden.", "kind": "forbidden"}), 403
         scope_id = workspace.id
     elif scope == "user":
@@ -206,7 +240,8 @@ def api_upsert_budget():
         },
     )
     db.session.commit()
-    return jsonify({"budget": _budget_status(budget)}), 200
+    row = _with_scope_names([_budget_status(budget)])[0]
+    return jsonify({"budget": row}), 200
 
 
 @bp.route("/api/budgets/<int:budget_id>", methods=["DELETE"])
@@ -221,8 +256,8 @@ def api_delete_budget(budget_id: int):
         if budget.user_id != current_user.id:
             return jsonify({"error": "Forbidden.", "kind": "forbidden"}), 403
     else:
-        workspace = _authorized_workspace(budget.workspace_id)
-        if not permissions.can("manage_billing", workspace.id, current_user):
+        workspace = _workspace_for_budget(budget.workspace_id)
+        if not _can_manage_budget(workspace):
             return jsonify({"error": "Forbidden.", "kind": "forbidden"}), 403
 
     metadata = {"scope": budget.scope, "scope_id": budget.scope_id}

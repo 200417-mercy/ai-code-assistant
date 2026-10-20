@@ -44,6 +44,45 @@
   </div>
 </div>
 
+<div class="collab-panel" id="workspace-usage-panel" aria-labelledby="workspace-usage-heading">
+  <h2 id="workspace-usage-heading">Workspace usage</h2>
+  <p class="field-hint" id="workspace-usage-note">
+    Token and cost totals across this workspace. Costs are estimates.
+  </p>
+  <div id="workspace-usage-totals" class="metrics-strip">
+    <p class="empty-note">Loading usage...</p>
+  </div>
+  <div class="usage-breakdown-grid">
+    <div>
+      <h3>By project</h3>
+      <table class="usage-table">
+        <thead><tr><th scope="col">Project</th><th scope="col">Tokens</th><th scope="col">Cost (est.)</th></tr></thead>
+        <tbody id="workspace-usage-projects">
+          <tr><td colspan="3" class="empty-note">Loading...</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div>
+      <h3>By source</h3>
+      <table class="usage-table">
+        <thead><tr><th scope="col">Source</th><th scope="col">Tokens</th><th scope="col">Cost (est.)</th></tr></thead>
+        <tbody id="workspace-usage-sources">
+          <tr><td colspan="3" class="empty-note">Loading...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+  <div id="workspace-usage-members-wrap"{% if my_role != 'owner' %} hidden{% endif %}>
+    <h3>By member</h3>
+    <table class="usage-table">
+      <thead><tr><th scope="col">Member</th><th scope="col">Role</th><th scope="col">Tokens</th><th scope="col">Cost (est.)</th></tr></thead>
+      <tbody id="workspace-usage-members">
+        <tr><td colspan="4" class="empty-note">Loading...</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
 {% if my_role == 'owner' %}
 <div class="collab-panel settings-panel">
   <h2>Collaboration settings</h2>

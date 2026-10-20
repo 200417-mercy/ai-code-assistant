@@ -64,8 +64,9 @@ from app.models.project_comment import COMMENT_MAX_LENGTH
 from app.models.review_comment import REVIEW_COMMENT_MAX_LENGTH
 from app.models.workspace_member import MEMBER_ROLES, ROLE_OWNER, STATUS_ACTIVE
 from app.models.workspace_settings import validate_member_role
+from app.services import currency as currency_service
 from app.services import email as email_service
-from app.services import ratelimit
+from app.services import ratelimit, workspace_usage
 from app.services import review_comments as review_comments_service
 from app.services.activity import record_activity
 from app.services.invitations import (
@@ -637,6 +638,23 @@ def api_activity_feed(workspace_id: int):
     items = [e.to_dict(actor_username=users.get(e.actor_id)) for e in events]
     next_cursor = _encode_cursor(events[-1]) if events and has_more else None
     return jsonify({"items": items, "next_cursor": next_cursor})
+
+
+@bp.route("/api/workspaces/<int:workspace_id>/usage", methods=["GET"])
+@login_required
+@require_workspace_member
+def api_workspace_usage(workspace_id: int):
+    """Workspace-wide usage dashboard (issue #447).
+
+    Every member receives workspace totals, usage by project and by source.
+    Owners additionally receive a per-member breakdown; contributors and
+    viewers receive only their own member row. Non-members get the uniform 404
+    from ``require_workspace_member``.
+    """
+    workspace = resolve_workspace(workspace_id)
+    payload = workspace_usage.workspace_usage(workspace, current_user)
+    payload["currency"] = currency_service.get_currency_config()
+    return jsonify(payload)
 
 
 @bp.route("/api/workspaces/<int:workspace_id>/audit", methods=["GET"])
