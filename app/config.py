@@ -148,6 +148,12 @@ class Config:
     # client-supplied manifest or URL. See ``app/services/plugin_catalog.py``.
     PLUGIN_CATALOG_FILE = os.getenv("PLUGIN_CATALOG_FILE", "")
 
+    # Optional remote marketplace catalog (#375). When no local catalog file is
+    # configured, the scanner may fetch this URL through the bounded plugin
+    # transport: https only, host allowlisted, timeout, size cap, no redirects.
+    # Empty by default, so remote fetching stays opt-in and fail closed.
+    PLUGIN_MARKETPLACE_URL = os.getenv("PLUGIN_MARKETPLACE_URL", "")
+
     # Directory scanned by the read-only plugin discovery endpoint (#172).
     # Discovery only reads ``manifest.json`` files from plugin subdirectories
     # and never installs, loads, or mutates anything. Defaults to the repo's

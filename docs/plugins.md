@@ -488,6 +488,7 @@ trusted, and plugin outbound traffic is denied until an operator opts in.
 | Variable | Safe default | Purpose |
 | -------- | ------------ | ------- |
 | `PLUGIN_CATALOG_FILE` | empty | Path to the validated JSON catalog used by `POST .../plugins/install-from-catalog`. Empty disables catalog installation. |
+| `PLUGIN_MARKETPLACE_URL` | empty | Optional https catalog URL fetched through the bounded plugin transport when `PLUGIN_CATALOG_FILE` is empty. The host must be on `PLUGIN_NETWORK_ALLOWLIST`; redirects, non-https URLs, oversized bodies, and non-allowlisted hosts are refused before any request. |
 | `PLUGIN_DISCOVERY_DIR` | `plugins` | Read-only directory scanned for `manifest.json` files by `GET /plugins/discover`. Nothing is installed or executed. |
 | `PLUGIN_TRUST_POLICY` | `if-present` | `if-present` accepts unsigned manifests but always refuses forged or untrusted signatures; `required` also refuses unsigned manifests. Use `required` for a hosted marketplace. |
 | `PLUGIN_TRUSTED_KEYS` | `{}` | JSON object of canonical publisher ids to Ed25519 public keys (base64 raw 32 bytes or PEM). Invalid key material aborts startup. |
@@ -507,6 +508,14 @@ trusted, and plugin outbound traffic is denied until an operator opts in.
 validated and re-read for each install request, so an operator's catalog edit is
 visible immediately. A TTL cache and its `PLUGIN_MARKETPLACE_CACHE_TTL` setting
 are tracked separately in #377.
+
+**Remote catalog (#375):** when `PLUGIN_CATALOG_FILE` is empty and
+`PLUGIN_MARKETPLACE_URL` is set, the catalog is fetched through
+`app/services/plugin_network.py`. The URL must be https and its host must be on
+`PLUGIN_NETWORK_ALLOWLIST`; those checks run before any socket is opened.
+Redirects are refused, the request uses `PLUGIN_NETWORK_TIMEOUT`, and the body
+is capped at the catalog limit (1 MiB). A local `PLUGIN_CATALOG_FILE` always
+takes precedence.
 
 ### Resource limits and failure behavior (#409, #410)
 
