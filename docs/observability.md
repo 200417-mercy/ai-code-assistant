@@ -95,6 +95,14 @@ The document contains:
 - `records` serialized with the ledger serializer;
 - `currency` and `cost_is_estimate: true`.
 
+`GET /api/usage/export.csv` (issue #454) returns the same user-scoped ledger as
+streamed CSV for billing. It accepts the same `workspace_id`, `project_id`, and
+`source` filters, uses the standard CSV writer so commas/quotes/newlines are
+escaped, and is capped at `USAGE_EXPORT_CSV_MAX_ROWS` (default 5,000; the cap
+can only be lowered). When rows are omitted the response sets
+`X-Export-Truncated: true`; `X-Export-Rows` reports the emitted row count. The
+column order is stable (`EXPORT_CSV_COLUMNS` in `app/services/usage_ledger.py`).
+
 ## Configuration
 
 | Setting | Default | Purpose |
@@ -102,6 +110,7 @@ The document contains:
 | `METRICS_ENABLED` | `1` | Hides `/metrics` (404) when disabled. |
 | `METRICS_TOKEN` | empty | Bearer token for scrapers. Empty falls back to admin-session auth. |
 | `USAGE_RETENTION_DAYS` | `365` | Minimum age before `flask usage purge` may delete ledger rows. |
+| `USAGE_EXPORT_CSV_MAX_ROWS` | `5000` | CSV row cap for `/api/usage/export.csv`; values above 5,000 are clamped. |
 | `BILLING_IMPORT_MAX_BYTES` | `1048576` | Maximum accepted billing CSV upload size. |
 | `BILLING_IMPORT_MAX_ROWS` | `5000` | Maximum accepted billing CSV rows. |
 | `CURRENCY_CODE` / `CURRENCY_SYMBOL` / `CURRENCY_DECIMAL_PLACES` | `USD` / `$` / `4` | Display currency for cost figures. |

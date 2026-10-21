@@ -10,6 +10,8 @@ Only metadata is stored. Prompts and completions are never written here.
 
 from __future__ import annotations
 
+import csv
+import io
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -66,6 +68,29 @@ EXPORT_SCHEMA_VERSION = 1
 #: deliberately bounded even when the ledger is large.
 EXPORT_DEFAULT_LIMIT = 100
 EXPORT_MAX_LIMIT = 500
+
+#: Hard row cap for the CSV export. Rows beyond the cap are omitted and the
+#: response advertises truncation instead of streaming an unbounded document.
+EXPORT_CSV_MAX_ROWS = 5000
+
+#: Stable CSV column order shared by the API export and its tests.
+EXPORT_CSV_COLUMNS = (
+    "created_at",
+    "user_id",
+    "workspace_id",
+    "project_id",
+    "conversation_id",
+    "source",
+    "provider",
+    "model",
+    "status",
+    "prompt_tokens",
+    "completion_tokens",
+    "total_tokens",
+    "tokens_estimated",
+    "cost_estimate",
+    "currency",
+)
 
 
 def normalize_source(source: Any) -> str | None:
@@ -516,6 +541,75 @@ def export_payload(
         "page_totals": page_totals,
         "records": [record.to_dict() for record in records],
     }
+
+
+def export_csv_chunks(
+    *,
+    user_id,
+    workspace_id=None,
+    project_id=None,
+    source=None,
+    max_rows: int | None = None,
+    currency: str = "USD",
+) -> tuple[list[str], bool, int]:
+    """Render a bounded CSV export for one user's ledger rows.
+
+    The authenticated user is the mandatory outer scope. Optional
+    workspace/project/source filters can only narrow that user's own data.
+
+    Rows are serialized with :mod:`csv` so commas, quotes, and newlines in
+    provider/model labels are escaped correctly. At most ``max_rows`` rows are
+    emitted (default :data:`EXPORT_CSV_MAX_ROWS`); when the filtered set is
+    larger, the caller must advertise truncation rather than implying a complete
+    export.
+
+    Returns ``(chunks, truncated, total)``. Chunks are pre-serialized lines so
+    the Flask route can stream them without materializing an unbounded body.
+    """
+    limit = EXPORT_CSV_MAX_ROWS if max_rows is None else max(1, int(max_rows))
+    normalized_source = normalize_source(source)
+    query = filtered_records_query(
+        user_id=user_id,
+        workspace_id=workspace_id,
+        project_id=project_id,
+        source=normalized_source,
+    )
+    total = query.count()
+    records = query.order_by(UsageRecord.created_at, UsageRecord.id).limit(limit).all()
+
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, lineterminator="\n")
+    chunks: list[str] = []
+    writer.writerow(EXPORT_CSV_COLUMNS)
+    chunks.append(buffer.getvalue())
+    buffer.seek(0)
+    buffer.truncate(0)
+
+    for record in records:
+        writer.writerow(
+            [
+                record.created_at.isoformat() if record.created_at else "",
+                record.user_id if record.user_id is not None else "",
+                record.workspace_id if record.workspace_id is not None else "",
+                record.project_id if record.project_id is not None else "",
+                record.conversation_id if record.conversation_id is not None else "",
+                normalize_source(record.source) or UNKNOWN_SOURCE,
+                record.provider or "",
+                record.model or "",
+                record.status or "",
+                int(record.prompt_tokens or 0),
+                int(record.completion_tokens or 0),
+                int(record.total_tokens or 0),
+                bool(record.tokens_estimated),
+                "" if record.cost_estimate is None else record.cost_estimate,
+                currency,
+            ]
+        )
+        chunks.append(buffer.getvalue())
+        buffer.seek(0)
+        buffer.truncate(0)
+
+    return chunks, total > len(records), total
 
 
 def breakdown_by_source(

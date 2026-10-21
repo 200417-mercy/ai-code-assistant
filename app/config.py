@@ -332,6 +332,9 @@ class Config:
     # purged with ``flask usage purge``. Rows newer than the window are never
     # removed, and the window is bounded to at least one day.
     USAGE_RETENTION_DAYS = int(os.getenv("USAGE_RETENTION_DAYS", "365"))
+    # Hard cap for GET /api/usage/export.csv (#454). Operators may lower it but
+    # never raise it above the service's absolute EXPORT_CSV_MAX_ROWS.
+    USAGE_EXPORT_CSV_MAX_ROWS = int(os.getenv("USAGE_EXPORT_CSV_MAX_ROWS", "5000"))
     # Optional SMTP for invitation email delivery. When unset, invitations are
     # delivered as in-app notifications only and the app never crashes on mail.
     SMTP_HOST = os.getenv("SMTP_HOST", "")
