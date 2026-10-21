@@ -1,6 +1,5 @@
 """Tests for the notification inbox API and preferences (#148/#150)."""
 
-
 from app.extensions import db
 from app.models import NotificationPreference, User, Workspace, WorkspaceMember
 from app.services.notifications import notify
