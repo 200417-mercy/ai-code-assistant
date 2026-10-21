@@ -19,6 +19,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+from app.services.plugin_base import PLUGIN_SDK_VERSION, PluginBase  # noqa: F401
 from app.services.plugin_compat import is_valid_compatibility
 from app.services.plugin_deps import PluginRef
 from app.services.plugin_execution import run_with_timeout
