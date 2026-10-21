@@ -1,8 +1,10 @@
 """Transactional email service.
 
-Sends plain-text + simple HTML email over SMTS using environment config. Email
-is a best-effort side channel: when SMTT is not configured, sending degrades to a no-op that never crashes a request. The in-app notification (see
-``app/services/notifications.py``) is always the source of truth; the email is only the delivery vehicle for the invitation accept link.
+Sends plain-text + simple HTML email over SMTP using environment config. Email
+is a best-effort side channel: when SMTP is not configured, sending degrades to
+a no-op that never crashes a request. The in-app notification (see
+``app/services/notifications.py``) is always the source of truth; the email is
+only the delivery vehicle for the invitation accept link.
 """
 
 from __future__ import annotations
@@ -117,7 +119,7 @@ def send_budget_alert_email(
     period_line = f" Period: {period}\n" if period else ""
     text = (
         f'Budget "{budget_name}" in workspace "{workspace_name}" '
-        f"has reached the {threshold_label} threshold.\n\n'
+        f"has reached the {threshold_label} threshold.\n\n"
         f"Spent:  {spent}\n"
         f"Limit:  {limit}\n"
         f"{period_line}\n"
@@ -128,7 +130,8 @@ def send_budget_alert_email(
         f"<strong>{workspace_name}</strong> has reached the "
         f"<strong>{threshold_label}</strong> threshold.</p>"
         f"<p>Spent: <strong>{spent}</strong><br>Limit: <strong>{limit}</strong></p>"
-        +f"<p>Period: {period}</p>" if period else ""
-        +"<p>You can review this budget in the app.</p>"
+        + f"<p>Period: {period}</p>"
+        if period
+        else "" + "<p>You can review this budget in the app.</p>"
     )
     return send_alert_email(to, subject, text, html)
