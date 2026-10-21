@@ -217,14 +217,17 @@
     return String(value || 0);
   }
 
-  function usageRow(cells) {
+  function usageRow(cells, estimatedCostIndex) {
     return (
       "<tr>" +
       cells
         .map(function (value, index) {
-          return index === 0
-            ? '<td scope="row">' + escapeHtml(value) + "</td>"
-            : "<td>" + escapeHtml(value) + "</td>";
+          var attributes = index === 0 ? ' scope="row"' : "";
+          if (index === estimatedCostIndex) {
+            attributes +=
+              ' title="Estimated from recorded usage and configured prices; not provider-reported spend."';
+          }
+          return "<td" + attributes + ">" + escapeHtml(value) + "</td>";
         })
         .join("") +
       "</tr>"
@@ -255,8 +258,8 @@
             '<strong class="metric-value">' + escapeHtml(formatTokens(totals.total_tokens)) + "</strong></div>" +
             '<div class="metric-card"><span class="metric-label">Requests</span>' +
             '<strong class="metric-value">' + escapeHtml(formatTokens(totals.count)) + "</strong></div>" +
-            '<div class="metric-card"><span class="metric-label">Estimated cost</span>' +
-            '<strong class="metric-value">' + escapeHtml(formatCost(totals.cost_estimate, currency)) + "</strong></div>";
+            '<div class="metric-card"><span class="metric-label" title="Estimated from recorded usage and configured prices; not provider-reported spend.">Estimated cost</span>' +
+            '<strong class="metric-value" title="Estimated from recorded usage and configured prices; not provider-reported spend.">' + escapeHtml(formatCost(totals.cost_estimate, currency)) + "</strong></div>";
         }
 
         var note = document.getElementById("workspace-usage-note");
@@ -273,7 +276,7 @@
               row.name,
               formatTokens(row.totals.total_tokens),
               formatCost(row.totals.cost_estimate, currency),
-            ]);
+            ], 2);
           }),
           "No project usage yet."
         );
@@ -285,7 +288,7 @@
               row.source,
               formatTokens(row.totals.total_tokens),
               formatCost(row.totals.cost_estimate, currency),
-            ]);
+            ], 2);
           }),
           "No usage recorded yet."
         );
@@ -299,7 +302,7 @@
                 row.role || "member",
                 formatTokens(row.totals.total_tokens),
                 formatCost(row.totals.cost_estimate, currency),
-              ]);
+              ], 3);
             }),
             "No member usage yet."
           );

@@ -179,6 +179,8 @@ class TestWorkspaceUsageDashboard:
         assert "workspace-usage-totals" in html
         assert "By project" in html
         assert "By source" in html
+        assert "Estimated cost" in html
+        assert "Costs are estimates, not provider-reported spend." in html
         # Members do not get the owner-only member table.
         assert 'id="workspace-usage-members-wrap" hidden' in html
 
@@ -204,7 +206,9 @@ class TestBudgetManagementUi:
         assert f'data-scope-id="{team["workspace"].id}"' in html
         assert 'data-token-limit="1000"' in html
         assert 'data-cost-limit="1.0"' in html
-        assert "estimated" in html
+        assert "Estimated cost used / limit" in html
+        assert "estimated usage" in html
+        assert "Compared against estimated usage, not provider-reported spend." in html
         assert "usage-bar" in html
         assert team["workspace"].name in html
 

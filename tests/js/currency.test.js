@@ -49,6 +49,6 @@ describe("currency formatting", () => {
       estimated_cost_usd: 0.0024,
       currency: { code: "USD", symbol: "$", decimal_places: 4 },
     });
-    expect(text).toBe("Estimated: ~1,234 tokens ($0.0024 USD; estimate)");
+    expect(text).toBe("Estimated cost: ~1,234 tokens ($0.0024 USD; estimate)");
   });
 });

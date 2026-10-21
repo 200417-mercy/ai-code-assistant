@@ -35,7 +35,7 @@
       <input id="budget-tokens" name="token_limit" type="number" min="0" step="1" inputmode="numeric">
     </div>
     <div class="settings-field">
-      <label for="budget-cost">Cost limit (blank to disable)</label>
+      <label for="budget-cost" title="Compared against estimated usage, not provider-reported spend.">Estimated cost limit (blank to disable)</label>
       <input id="budget-cost" name="cost_limit" type="number" min="0" step="0.000001" inputmode="decimal">
     </div>
     <div class="settings-field">
@@ -51,7 +51,7 @@
       <tr>
         <th scope="col">Scope</th>
         <th scope="col">Tokens</th>
-        <th scope="col">Cost</th>
+        <th scope="col" title="Usage is estimated from recorded tokens and configured prices; the limit is your configured threshold.">Estimated cost used / limit</th>
         <th scope="col">Status</th>
         <th scope="col"><span class="visually-hidden">Actions</span></th>
       </tr>
@@ -68,7 +68,7 @@
           data-warn-threshold="{{ budget.warn_threshold }}">
         <td>{{ budget.scope_name }}</td>
         <td>
-          <div class="usage-line">
+          <div class="usage-line" title="Usage is estimated from recorded tokens and configured prices. The value after the slash is your configured limit.">
             {{ '{:,}'.format(budget.tokens_used) }}
             {% if budget.token_limit is not none %}/ {{ '{:,}'.format(budget.token_limit) }}{% else %}<span class="chat-hint">no limit</span>{% endif %}
           </div>
@@ -83,7 +83,7 @@
             {{ '%.4f'|format(budget.cost_used) }}
             {% if budget.cost_limit is not none %}/ {{ '%.4f'|format(budget.cost_limit) }}{% else %}<span class="chat-hint">no limit</span>{% endif %}
           </div>
-          <span class="chat-hint">estimated</span>
+          <span class="chat-hint" title="This usage amount is an estimate, not provider-reported spend.">estimated usage</span>
           {% if budget.cost_limit is not none %}
           <div class="usage-bar" role="img" aria-label="{{ cost_pct|round(0)|int }}% of cost limit used">
             <span style="width: {{ cost_pct|round(0)|int }}%"></span>
@@ -121,9 +121,9 @@
 <section aria-labelledby="reconciliation-heading">
   <h2 id="reconciliation-heading">Reconciliation</h2>
   <p>
-    Reported total: <strong>${{ '%.6f'|format(report.reported_total_usd) }}</strong> ·
-    Estimated total: <strong>${{ '%.6f'|format(report.estimated_total_usd) }}</strong> ·
-    Variance: <strong>${{ '%.6f'|format(report.variance_usd) }}</strong>
+    Reported total: <strong title="Imported from provider billing reports; this is reported spend, not an estimate.">${{ '%.6f'|format(report.reported_total_usd) }}</strong> ·
+    Estimated total: <strong title="Estimated from recorded token usage; this is not an invoice amount.">${{ '%.6f'|format(report.estimated_total_usd) }}</strong> ·
+    Variance: <strong title="Reported total minus estimated total; this is a reconciliation difference, not a separate charge.">${{ '%.6f'|format(report.variance_usd) }}</strong>
   </p>
   {% if report.rows %}
   <table class="billing-table">
@@ -131,9 +131,9 @@
       <tr>
         <th scope="col">Provider</th>
         <th scope="col">Period</th>
-        <th scope="col">Reported (USD)</th>
-        <th scope="col">Estimated (USD)</th>
-        <th scope="col">Variance (USD)</th>
+        <th scope="col" title="Provider-reported spend imported from a billing report.">Reported (USD)</th>
+        <th scope="col" title="Estimated from recorded token usage; not an invoice amount.">Estimated (USD)</th>
+        <th scope="col" title="Reported amount minus estimated amount.">Variance (USD)</th>
         <th scope="col">Variance (%)</th>
       </tr>
     </thead>
@@ -142,9 +142,9 @@
       <tr>
         <td>{{ row.provider }}</td>
         <td>{{ row.period }}</td>
-        <td>{{ '%.6f'|format(row.reported_usd) }}</td>
-        <td>{{ '%.6f'|format(row.estimated_usd) }}</td>
-        <td>{{ '%.6f'|format(row.variance_usd) }}</td>
+        <td title="Provider-reported spend imported from a billing report.">{{ '%.6f'|format(row.reported_usd) }}</td>
+        <td title="Estimated from recorded token usage; not an invoice amount.">{{ '%.6f'|format(row.estimated_usd) }}</td>
+        <td title="Reported amount minus estimated amount; not a separate charge.">{{ '%.6f'|format(row.variance_usd) }}</td>
         <td>
           {% if row.variance_pct is not none %}{{ '%.4f'|format(row.variance_pct) }}{% else %}n/a{% endif %}
         </td>

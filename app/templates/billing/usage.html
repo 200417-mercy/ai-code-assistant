@@ -41,7 +41,7 @@
     <div class="metric"><span class="metric-label">Prompt tokens</span><strong>{{ dashboard.totals.prompt_tokens }}</strong></div>
     <div class="metric"><span class="metric-label">Completion tokens</span><strong>{{ dashboard.totals.completion_tokens }}</strong></div>
     <div class="metric"><span class="metric-label">Operations</span><strong>{{ dashboard.totals['count'] }}</strong></div>
-    <div class="metric"><span class="metric-label">Estimated cost</span><strong>{{ dashboard.currency.symbol }}{{ '%.6f'|format(dashboard.totals.cost_estimate) }}</strong></div>
+    <div class="metric"><span class="metric-label" title="Estimated from recorded usage and configured prices; not provider-reported spend.">Estimated cost</span><strong title="Estimated from recorded usage and configured prices; not provider-reported spend.">{{ dashboard.currency.symbol }}{{ '%.6f'|format(dashboard.totals.cost_estimate) }}</strong></div>
   </div>
   <p class="sidebar-empty">
     {{ dashboard.totals.priced_records }} of {{ dashboard.totals['count'] }} operations have a known price.
@@ -60,7 +60,7 @@
         <th scope="col">Prompt</th>
         <th scope="col">Completion</th>
         <th scope="col">Total tokens</th>
-        <th scope="col">Estimated cost</th>
+        <th scope="col" title="Estimated from recorded usage and configured prices; not provider-reported spend.">Estimated cost</th>
       </tr>
     </thead>
     <tbody>
@@ -71,7 +71,7 @@
         <td>{{ row.prompt_tokens }}</td>
         <td>{{ row.completion_tokens }}</td>
         <td>{{ row.total_tokens }}</td>
-        <td>{{ dashboard.currency.symbol }}{{ '%.6f'|format(row.cost_estimate) }}</td>
+        <td title="Estimated from recorded usage and configured prices; not provider-reported spend.">{{ dashboard.currency.symbol }}{{ '%.6f'|format(row.cost_estimate) }}</td>
       </tr>
       {% endfor %}
     </tbody>
@@ -97,7 +97,7 @@
         <th scope="col">Prompt</th>
         <th scope="col">Completion</th>
         <th scope="col">Total tokens</th>
-        <th scope="col">Estimated cost</th>
+        <th scope="col" title="Estimated from recorded usage and configured prices; not provider-reported spend.">Estimated cost</th>
       </tr>
     </thead>
     <tbody>
@@ -108,7 +108,7 @@
         <td>{{ row.prompt_tokens }}</td>
         <td>{{ row.completion_tokens }}</td>
         <td>{{ row.total_tokens }}</td>
-        <td>{{ dashboard.currency.symbol }}{{ '%.6f'|format(row.cost_estimate) }}</td>
+        <td title="Estimated from recorded usage and configured prices; not provider-reported spend.">{{ dashboard.currency.symbol }}{{ '%.6f'|format(row.cost_estimate) }}</td>
       </tr>
       {% endfor %}
     </tbody>

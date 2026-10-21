@@ -34,6 +34,11 @@ def test_page_renders_totals_and_all_three_breakdowns(client, db, make_user, log
     assert "gpt-4o" in body
     assert "analysis" in body
     assert ">130<" in body  # total tokens
+    assert "Estimated cost" in body
+    estimate_tooltip = (
+        "Estimated from recorded usage and configured prices; " "not provider-reported spend."
+    )
+    assert f'title="{estimate_tooltip}"' in body
 
 
 def test_page_never_shows_another_users_usage(client, db, make_user, login):

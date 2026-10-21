@@ -228,7 +228,16 @@ class TestRoutes:
     def test_page_and_api_render(self, client, make_user, login):
         make_user(username="routebiller", email="routebiller@example.com")
         login(email="routebiller@example.com")
-        assert client.get("/billing/").status_code == 200
+        page = client.get("/billing/")
+        assert page.status_code == 200
+        html = page.get_data(as_text=True)
+        assert "Reported total:" in html
+        assert "Estimated total:" in html
+        assert "Variance:" in html
+        assert (
+            "Reported total minus estimated total; this is a reconciliation difference, "
+            "not a separate charge." in html
+        )
         assert client.get("/billing/api/reconciliation").status_code == 200
 
     def test_import_json_round_trip(self, client, make_user, login, app):

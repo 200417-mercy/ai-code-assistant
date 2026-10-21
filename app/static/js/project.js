@@ -539,7 +539,7 @@
     }
     var tokens = Number(estimate && estimate.prompt_tokens) || 0;
     var cost = Number(estimate && estimate.estimated_cost_usd) || 0;
-    return "Estimated: ~" + tokens.toLocaleString() + " tokens (~$" + cost.toFixed(4) + " USD; estimate)";
+    return "Estimated cost: ~" + tokens.toLocaleString() + " tokens (~$" + cost.toFixed(4) + " USD; estimate)";
   }
 
   var chatEstimateTimer = null;

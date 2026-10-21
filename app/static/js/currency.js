@@ -68,7 +68,7 @@
       amount = data.estimated_cost;
     }
     return (
-      "Estimated: ~" +
+      "Estimated cost: ~" +
       Math.max(0, Math.trunc(tokens)).toLocaleString("en-US") +
       " tokens (" +
       formatCost(amount, currency) +
