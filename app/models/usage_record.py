@@ -62,6 +62,9 @@ class UsageRecord(db.Model):
     #: Estimated cost in the configured display currency. ``None`` means the
     #: provider/model has no known price; it is never silently reported as zero.
     cost_estimate = db.Column(db.Float, nullable=True)
+    #: When the cost estimate was last recomputed after a price change (#440).
+    #: ``None`` means the row still carries its original estimate.
+    cost_recomputed_at = db.Column(db.DateTime(timezone=True), nullable=True)
     #: Correlation id shared with the request log (``X-Request-ID``). Nullable
     #: because rows can be written by background/CLI work with no request.
     request_id = db.Column(db.String(64), nullable=True, index=True)
@@ -93,6 +96,9 @@ class UsageRecord(db.Model):
             "total_tokens": self.total_tokens,
             "tokens_estimated": bool(self.tokens_estimated),
             "cost_estimate": self.cost_estimate,
+            "cost_recomputed_at": (
+                self.cost_recomputed_at.isoformat() if self.cost_recomputed_at else None
+            ),
             "request_id": self.request_id,
             "latency_ms": self.latency_ms,
             "status": self.status,

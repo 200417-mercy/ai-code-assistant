@@ -108,6 +108,21 @@ Implementation: `app/services/billing_reconciliation.py`,
 `app/models/provider_billing_record.py`; tests:
 `tests/test_billing_reconciliation.py`.
 
+## Recomputing historical costs
+
+When a price or workspace override changes, recompute stored estimates with the
+usage CLI:
+
+```bash
+flask usage recompute --limit 5000 --batch-size 500
+flask usage recompute --workspace-id 7 --dry-run --json
+```
+
+The command is bounded and idempotent: it processes keyset batches, writes only
+rows whose estimate differs, and stamps `cost_recomputed_at` on each changed
+row. Unknown provider/model combinations are left as `NULL` rather than zero.
+See [Observability § Cost recomputation](observability.md#cost-recomputation).
+
 ## Exports
 
 Usage exports are documented in

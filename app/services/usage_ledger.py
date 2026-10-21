@@ -69,6 +69,12 @@ EXPORT_SCHEMA_VERSION = 1
 EXPORT_DEFAULT_LIMIT = 100
 EXPORT_MAX_LIMIT = 500
 
+#: Bounds for the historical cost recomputation command (#440).
+RECOMPUTE_DEFAULT_BATCH_SIZE = 500
+RECOMPUTE_MAX_BATCH_SIZE = 1000
+RECOMPUTE_DEFAULT_MAX_ROWS = 5000
+RECOMPUTE_MAX_ROWS = 100_000
+
 #: Hard row cap for the CSV export. Rows beyond the cap are omitted and the
 #: response advertises truncation instead of streaming an unbounded document.
 EXPORT_CSV_MAX_ROWS = 5000
@@ -612,6 +618,144 @@ def export_csv_chunks(
     return chunks, total > len(records), total
 
 
+def recompute_cost_estimates(
+    *,
+    user_id=None,
+    workspace_id=None,
+    batch_size: int = RECOMPUTE_DEFAULT_BATCH_SIZE,
+    max_rows: int = RECOMPUTE_DEFAULT_MAX_ROWS,
+    dry_run: bool = False,
+    recomputed_at: datetime | None = None,
+) -> dict:
+    """Recompute stored cost estimates from the current price table (#440).
+
+    Only rows whose recomputed value differs are written. Each changed row gets
+    ``cost_recomputed_at`` so operators can see when a price change was applied;
+    a second run is a no-op (idempotent). Rows whose provider/model has no known
+    price are left with ``cost_estimate = None`` rather than being guessed.
+
+    The work is bounded by ``max_rows`` and processed in keyset batches of
+    ``batch_size`` so a large ledger is never loaded at once.
+    """
+    batch_size = max(1, min(int(batch_size), RECOMPUTE_MAX_BATCH_SIZE))
+    max_rows = max(0, min(int(max_rows), RECOMPUTE_MAX_ROWS))
+    timestamp = recomputed_at or datetime.now(UTC)
+
+    query = filtered_records_query(user_id=user_id, workspace_id=workspace_id)
+    cursor = 0
+    scanned = updated = unchanged = unpriced = batches = 0
+
+    while scanned < max_rows:
+        take = min(batch_size, max_rows - scanned)
+        rows = query.filter(UsageRecord.id > cursor).order_by(UsageRecord.id).limit(take).all()
+        if not rows:
+            break
+        batches += 1
+
+        for record in rows:
+            scanned += 1
+            new_cost = pricing.estimate_cost_usd(
+                record.provider,
+                record.model,
+                prompt_tokens=int(record.prompt_tokens or 0),
+                completion_tokens=int(record.completion_tokens or 0),
+                workspace_id=record.workspace_id,
+            )
+            old_cost = record.cost_estimate
+            if new_cost is None:
+                unpriced += 1
+                if old_cost is None:
+                    continue
+            if new_cost == old_cost:
+                unchanged += 1
+                continue
+            updated += 1
+            if not dry_run:
+                record.cost_estimate = new_cost
+                record.cost_recomputed_at = timestamp
+
+        cursor = rows[-1].id
+        if not dry_run:
+            db.session.commit()
+
+    return {
+        "scanned": scanned,
+        "updated": updated,
+        "unchanged": unchanged,
+        "unpriced": unpriced,
+        "batches": batches,
+        "dry_run": bool(dry_run),
+        "max_rows": max_rows,
+        "recomputed_at": None if dry_run else timestamp.isoformat(),
+    }
+
+
+#: Default and maximum number of provider/model groups returned (#450).
+BREAKDOWN_DEFAULT_LIMIT = 20
+BREAKDOWN_MAX_LIMIT = 100
+#: Label used when a historical row has no provider/model.
+UNKNOWN_DIMENSION = "unknown"
+
+
+def _dimension_label(value) -> str:
+    text = str(value or "").strip()
+    return text[:100] if text else UNKNOWN_DIMENSION
+
+
+def _merge_summaries(rows: list[dict]) -> dict:
+    merged = {
+        "count": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "cost_estimate": 0.0,
+        "priced_records": 0,
+        "estimated_records": 0,
+    }
+    for row in rows:
+        for key in merged:
+            merged[key] += row.get(key, 0)
+    merged["cost_estimate"] = pricing.round_cost(merged["cost_estimate"])
+    return merged
+
+
+def breakdown_by_dimension(
+    records,
+    attribute: str,
+    *,
+    limit: int = BREAKDOWN_DEFAULT_LIMIT,
+) -> tuple[list[dict], int, bool]:
+    """Aggregate records by ``provider`` or ``model`` with a bounded group count.
+
+    Rows with a missing/blank label are grouped under ``unknown`` instead of
+    being dropped. Results are sorted by estimated cost, then tokens, then label
+    (all descending except the label tie-break). When more than ``limit`` groups
+    exist, the remainder is merged into an explicit ``other`` row and
+    ``truncated`` is returned as ``True``.
+    """
+    limit = max(1, min(int(limit), BREAKDOWN_MAX_LIMIT))
+    buckets: dict[str, list] = {}
+    for record in records:
+        label = _dimension_label(getattr(record, attribute, None))
+        buckets.setdefault(label, []).append(record)
+
+    rows = [{attribute: label, **summarize_records(items)} for label, items in buckets.items()]
+    rows.sort(
+        key=lambda row: (
+            -row["cost_estimate"],
+            -row["total_tokens"],
+            row[attribute],
+        )
+    )
+    total_groups = len(rows)
+    truncated = total_groups > limit
+    if truncated:
+        omitted = rows[limit:]
+        rows = rows[:limit]
+        rows.append({attribute: "other", **_merge_summaries(omitted)})
+    return rows, total_groups, truncated
+
+
 def breakdown_by_source(
     records=None,
     *,
@@ -649,14 +793,35 @@ def breakdown_payload(
     user_id=None,
     workspace_id=None,
     project_id=None,
+    limit: int = BREAKDOWN_DEFAULT_LIMIT,
 ) -> dict:
-    """Build the JSON-friendly payload used by the breakdown API."""
+    """Build the JSON-friendly payload used by the breakdown API.
+
+    Source rows keep their stable all-known-sources shape. Provider and model
+    rows are bounded lists sorted by cost/tokens, with unknown labels preserved
+    as ``unknown`` and overflow merged into ``other``.
+    """
+    limit = max(1, min(int(limit), BREAKDOWN_MAX_LIMIT))
     records = query_records(user_id=user_id, workspace_id=workspace_id, project_id=project_id)
     by_source = breakdown_by_source(records)
     totals = summarize_records(records)
+    by_provider, provider_groups, provider_truncated = breakdown_by_dimension(
+        records, "provider", limit=limit
+    )
+    by_model, model_groups, model_truncated = breakdown_by_dimension(records, "model", limit=limit)
     return {
         "by_source": by_source,
         "sources": [{"source": source, **stats} for source, stats in by_source.items()],
+        "by_provider": by_provider,
+        "providers": by_provider,
+        "by_model": by_model,
+        "models": by_model,
+        "provider_groups_total": provider_groups,
+        "model_groups_total": model_groups,
+        "provider_truncated": provider_truncated,
+        "model_truncated": model_truncated,
+        "group_limit": limit,
+        "max_group_limit": BREAKDOWN_MAX_LIMIT,
         "totals": totals,
         "known_sources": list(SOURCES),
     }

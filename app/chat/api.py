@@ -323,19 +323,26 @@ def usage_summary():
 @_login_required
 @_rate_limit("usage")
 def usage_breakdown():
-    """Return usage counts and estimated cost grouped by ledger source.
+    """Return usage counts and estimated cost grouped by source, provider and model.
 
     The authenticated user's records are always the outer scope, so an optional
     ``workspace_id`` or ``project_id`` filter can never expose another account's
-    usage. Unknown historical sources are grouped under ``unknown`` rather than
-    dropped or causing a 500.
+    usage. Unknown historical sources/providers/models are grouped under
+    ``unknown`` rather than dropped or causing a 500. Provider/model groups are
+    bounded by ``limit`` (1-100, default 20); overflow is merged into ``other``
+    and flagged with ``*_truncated``.
     """
     workspace_id = request.args.get("workspace_id", type=int)
     project_id = request.args.get("project_id", type=int)
+    limit = request.args.get("limit", type=int)
+    if limit is None:
+        limit = usage_ledger.BREAKDOWN_DEFAULT_LIMIT
+    limit = max(1, min(limit, usage_ledger.BREAKDOWN_MAX_LIMIT))
     payload = usage_ledger.breakdown_payload(
         user_id=current_user.id,
         workspace_id=workspace_id,
         project_id=project_id,
+        limit=limit,
     )
     payload["currency"] = get_currency_config()
     payload["cost_is_estimate"] = True
