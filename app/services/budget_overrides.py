@@ -84,6 +84,7 @@ def create_budget_override(
     if len(reason_text) > 500:
         raise BudgetOverrideError("reason must be at most 500 characters.")
 
+    prior = active_budget_override(resolved)
     row = WorkspaceBudgetOverride(
         workspace_id=resolved.id,
         created_by_id=getattr(user, "id", user),
@@ -107,6 +108,12 @@ def create_budget_override(
             "starts_at": start.isoformat(),
             "expires_at": end.isoformat(),
             "reason": reason_text,
+            "diff": {
+                "limit_amount": {
+                    "before": prior.limit_amount if prior is not None else None,
+                    "after": limit_value,
+                }
+            },
         },
     )
 
