@@ -8,17 +8,17 @@ from ``on_enable``) runs.
 from __future__ import annotations
 
 from app.services.events import get_dispatcher
+from app.services.plugin_base import PluginBase
 
 PLUGIN_ID = "hello-world"
 EVENT_TYPE = "project.created"
 
 
-class HelloWorldPlugin:
+class HelloWorldPlugin(PluginBase):
     """Record ``project.created`` events and expose the latest one."""
 
     def __init__(self, app=None, manifest=None):
-        self.app = app
-        self.manifest = manifest
+        super().__init__(app=app, manifest=manifest)
         self.seen_project_ids: list[int] = []
 
     def register(self) -> None:

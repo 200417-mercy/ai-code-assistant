@@ -79,6 +79,28 @@ Empty scopes return zero totals and empty breakdowns with the same shape, so
 clients render empty states without guessing. CSV exports stop at 5,000 rows or
 2 MiB, whichever comes first, and set `X-Export-Truncated: true` when clipped.
 
+`GET /api/usage/breakdown` also returns bounded provider/model groups:
+`by_provider`/`providers` and `by_model`/`models`, sorted by estimated cost,
+then total tokens, then label. Rows with no provider/model are grouped under
+`unknown`. `limit` defaults to 20 and is clamped to 100; overflow is merged into
+an explicit `other` row and reported via `provider_truncated`/`model_truncated`
+and `*_groups_total`. Source rows keep their stable all-known-sources shape.
+
+## Cost recomputation
+
+Price-table changes do not rewrite history automatically. Run the bounded,
+idempotent recompute command after updating a price or workspace override:
+
+```bash
+flask usage recompute --limit 5000 --batch-size 500
+flask usage recompute --workspace-id 7 --dry-run --json
+```
+
+Only rows whose recomputed value differs are written, and each changed row gets
+`cost_recomputed_at`. A second run updates nothing. Rows whose provider/model
+has no known price become `NULL` (never zero). Use `--user-id`/`--workspace-id`
+to narrow the scope, `--limit` to cap scanned rows, and `--dry-run` to preview.
+
 ## Usage export
 
 `GET /api/usage/export` returns a paginated JSON document scoped to the current

@@ -115,6 +115,31 @@ Key points:
 - **Hooks are isolated too.** An absent hook is a no-op and a raising hook does
   not prevent the enable/disable state change.
 
+### Optional SDK base class
+
+`app.services.plugin_base.PluginBase` provides documented, no-op defaults for
+`register`, `handle_event`, `on_enable`, `on_disable`, and `on_uninstall`, plus
+`app`/`manifest` attributes and a `plugin_id` helper. Subclass it and override
+only what you need:
+
+```python
+from app.services.plugin_base import PluginBase
+
+
+class HelloWorldPlugin(PluginBase):
+    def on_enable(self):
+        self.register()
+
+    def register(self):
+        ...  # subscribe with plugin_id=PLUGIN_ID
+```
+
+The author-facing contract is versioned by `PLUGIN_SDK_VERSION` (currently
+`1.0`). Additive methods may appear in minor releases; existing hook names and
+call signatures remain stable within major version `1`. A breaking change bumps
+the major version and is documented here. The base class is re-exported from
+`app.services.plugins` for convenience.
+
 ## 4. Install and enable
 
 Install the plugin (operator scope — registers the global `Plugin` row, never
