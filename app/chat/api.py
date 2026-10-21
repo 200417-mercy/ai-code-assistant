@@ -10,6 +10,7 @@ Machine-facing REST surface for the chat feature:
     GET    /api/usage                              per-user token usage summary
     GET    /api/usage/breakdown                    usage and cost by source
     GET    /api/usage/export                       bounded JSON usage export
+    GET    /api/usage/export.csv                   bounded, streaming CSV export
     GET    /api/usage/top                          top conversations/projects by cost
 
 All routes require authentication and are owner-scoped. Errors use RFC 7807
@@ -23,7 +24,7 @@ from __future__ import annotations
 import functools
 import json
 
-from flask import Blueprint, current_app, jsonify, request
+from flask import Blueprint, Response, current_app, jsonify, request, stream_with_context
 from flask_login import current_user
 
 from app.chat import routes as chat_routes
@@ -339,6 +340,48 @@ def usage_breakdown():
     payload["currency"] = get_currency_config()
     payload["cost_is_estimate"] = True
     return jsonify(payload)
+
+
+@bp.route("/usage/export.csv", methods=["GET"])
+@_login_required
+@_rate_limit("usage")
+def usage_export_csv():
+    """Export the current user's usage ledger as bounded CSV for billing.
+
+    The authenticated user is always the outer scope; ``workspace_id``,
+    ``project_id``, and ``source`` only narrow that user's own rows. Rows are
+    serialized with the standard CSV writer so commas, quotes, and newlines in
+    provider/model labels round-trip correctly.
+
+    The row cap defaults to :data:`usage_ledger.EXPORT_CSV_MAX_ROWS` (5,000) and
+    can only be lowered by ``USAGE_EXPORT_CSV_MAX_ROWS``. When rows are omitted,
+    the response sets ``X-Export-Truncated: true`` and never implies a complete
+    export. The body is streamed from pre-serialized line chunks.
+    """
+    configured = current_app.config.get(
+        "USAGE_EXPORT_CSV_MAX_ROWS", usage_ledger.EXPORT_CSV_MAX_ROWS
+    )
+    try:
+        max_rows = int(configured)
+    except (TypeError, ValueError):
+        max_rows = usage_ledger.EXPORT_CSV_MAX_ROWS
+    max_rows = max(1, min(max_rows, usage_ledger.EXPORT_CSV_MAX_ROWS))
+
+    chunks, truncated, total = usage_ledger.export_csv_chunks(
+        user_id=current_user.id,
+        workspace_id=request.args.get("workspace_id", type=int),
+        project_id=request.args.get("project_id", type=int),
+        source=request.args.get("source"),
+        max_rows=max_rows,
+        currency=get_currency_config()["code"],
+    )
+    response = Response(stream_with_context(iter(chunks)), mimetype="text/csv")
+    response.headers["Content-Disposition"] = 'attachment; filename="usage.csv"'
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["X-Export-Rows"] = str(min(total, max_rows))
+    if truncated:
+        response.headers["X-Export-Truncated"] = "true"
+    return response
 
 
 @bp.route("/usage/top", methods=["GET"])
